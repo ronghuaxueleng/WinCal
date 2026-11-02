@@ -1,5 +1,7 @@
 #pragma once
 
+#include "china_holidays.h"
+
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -48,6 +50,11 @@ public:
     void Load();
     [[nodiscard]] bool RefreshFromNetwork(std::stop_token stopToken);
     [[nodiscard]] bool RefreshSystemCalendar(int year, int month, std::stop_token stopToken);
+    // Returns true when a new year is requested, so the refresh worker can wake.
+    [[nodiscard]] bool RequestHolidayYear(int year);
+    [[nodiscard]] bool RequestIcsYear(int year);
+    [[nodiscard]] bool LoadHolidayYear(int year, std::string_view content);
+    [[nodiscard]] std::wstring HolidayNameForDate(int year, int month, int day) const;
 
     [[nodiscard]] bool HasEvents(int year, int month, int day) const;
     [[nodiscard]] size_t EventCountForDate(int year, int month, int day) const;
@@ -81,7 +88,12 @@ private:
     SystemCalendarState systemState_{SystemCalendarState::Disabled};
     int refreshMinutes_{30};
     int upcomingDays_{3};
+    int requestedIcsYear_{};
+    int loadedIcsYear_{};
+    std::map<int, ChinaHolidayYear> holidayYears_;
+    std::map<int, std::chrono::steady_clock::time_point> holidayAttempts_;
 
     void RebuildEventsLocked();
+    [[nodiscard]] bool RefreshHolidaysFromNetwork(std::stop_token stopToken);
 };
 }

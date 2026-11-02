@@ -1,0 +1,25 @@
+LIBRARY windhawk.dll
+EXPORTS
+    InternalWh_ApplyHookOperations
+    InternalWh_DeleteValue
+    InternalWh_Disasm
+    InternalWh_FindCloseSymbol
+    InternalWh_FindFirstSymbol4
+    InternalWh_FindNextSymbol2
+    InternalWh_FreeStringSetting
+    InternalWh_FreeUrlContent
+    InternalWh_GetBinaryValue
+    InternalWh_GetIntSetting
+    InternalWh_GetIntValue
+    InternalWh_GetModStoragePath
+    InternalWh_GetStringSetting
+    InternalWh_GetStringValue
+    InternalWh_GetUrlContent
+    InternalWh_HookSymbols
+    InternalWh_IsLogEnabled
+    InternalWh_Log
+    InternalWh_RemoveFunctionHook
+    InternalWh_SetBinaryValue
+    InternalWh_SetFunctionHook
+    InternalWh_SetIntValue
+    InternalWh_SetStringValue

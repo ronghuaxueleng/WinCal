@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "taskbar_format.h"
 
 namespace wincal
 {
@@ -18,6 +19,9 @@ struct AppSettings
     int upcomingDays{3};
     std::wstring weekStartDay{L"Sunday"};
     bool monthPaging{true};
+    bool weatherAutoLocation{true};
+    bool taskbarStatus{true};
+    std::wstring taskbarFormat{DefaultTaskbarFormat};
 };
 
 class SettingsStore

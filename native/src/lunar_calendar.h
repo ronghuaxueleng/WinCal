@@ -10,8 +10,10 @@ class LunarCalendar
 {
 public:
     [[nodiscard]] std::wstring TextForDate(int year, int month, int day);
+    [[nodiscard]] std::wstring FullTextForDate(int year, int month, int day);
 
 private:
     std::map<std::tuple<int, int, int>, std::wstring> cache_;
+    std::map<std::tuple<int, int, int>, std::wstring> fullCache_;
 };
 }

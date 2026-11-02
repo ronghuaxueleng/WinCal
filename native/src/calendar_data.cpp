@@ -1,3 +1,5 @@
+#include "atomic_file.h"
+#include "json_text.h"
 #include "calendar_data.h"
 #include "refresh_policy.h"
 
@@ -166,117 +168,6 @@ bool IsValidIcs(std::string_view content)
            content.find("END:VCALENDAR") != std::string_view::npos;
 }
 
-bool ReplaceFileAtomically(const std::filesystem::path& path, std::string_view content)
-{
-    std::error_code error;
-    std::filesystem::create_directories(path.parent_path(), error);
-    if (error)
-        return false;
-
-    auto temporary = path;
-    temporary += L".download";
-    std::filesystem::remove(temporary, error);
-    {
-        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-        if (!stream)
-            return false;
-        stream.write(content.data(), static_cast<std::streamsize>(content.size()));
-        stream.flush();
-        if (!stream)
-        {
-            stream.close();
-            std::filesystem::remove(temporary, error);
-            return false;
-        }
-    }
-
-    if (!MoveFileExW(
-            temporary.c_str(), path.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    {
-        std::filesystem::remove(temporary, error);
-        return false;
-    }
-    return true;
-}
-
-void AppendUtf8(std::string& output, unsigned codepoint)
-{
-    if (codepoint <= 0x7F)
-        output.push_back(static_cast<char>(codepoint));
-    else if (codepoint <= 0x7FF)
-    {
-        output.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
-        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    }
-    else
-    {
-        output.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
-        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    }
-}
-
-int HexDigit(char value)
-{
-    if (value >= '0' && value <= '9') return value - '0';
-    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-    return -1;
-}
-
-std::string DecodeJsonString(std::string_view value)
-{
-    std::string result;
-    for (size_t index = 0; index < value.size(); ++index)
-    {
-        const char current = value[index];
-        if (current != '\\' || index + 1 >= value.size())
-        {
-            result.push_back(current);
-            continue;
-        }
-
-        const char escaped = value[++index];
-        switch (escaped)
-        {
-        case '"': result.push_back('"'); break;
-        case '\\': result.push_back('\\'); break;
-        case '/': result.push_back('/'); break;
-        case 'b': result.push_back('\b'); break;
-        case 'f': result.push_back('\f'); break;
-        case 'n': result.push_back('\n'); break;
-        case 'r': result.push_back('\r'); break;
-        case 't': result.push_back('\t'); break;
-        case 'u':
-        {
-            if (index + 4 >= value.size())
-                break;
-            unsigned codepoint{};
-            bool valid = true;
-            for (int digitIndex = 0; digitIndex < 4; ++digitIndex)
-            {
-                const int digit = HexDigit(value[index + 1 + digitIndex]);
-                if (digit < 0)
-                {
-                    valid = false;
-                    break;
-                }
-                codepoint = codepoint * 16 + static_cast<unsigned>(digit);
-            }
-            if (valid)
-            {
-                AppendUtf8(result, codepoint);
-                index += 4;
-            }
-            break;
-        }
-        default: result.push_back(escaped); break;
-        }
-    }
-    return result;
-}
-
 size_t FindJsonValue(std::string_view json, std::string_view key)
 {
     const std::string quotedKey = "\"" + std::string(key) + "\"";
@@ -298,7 +189,7 @@ std::string JsonString(std::string_view json, std::string_view key)
     for (size_t index = start + 1; index < json.size(); ++index)
     {
         if (!escaped && json[index] == '"')
-            return DecodeJsonString(json.substr(start + 1, index - start - 1));
+            return wincal::DecodeJsonText(json.substr(start + 1, index - start - 1));
         escaped = !escaped && json[index] == '\\';
         if (json[index] != '\\') escaped = false;
     }
@@ -339,7 +230,7 @@ std::vector<std::string> JsonStringArray(std::string_view json, std::string_view
         {
             if (!escaped && json[position] == '"')
             {
-                values.push_back(DecodeJsonString(json.substr(start, position - start)));
+                values.push_back(wincal::DecodeJsonText(json.substr(start, position - start)));
                 ++position;
                 break;
             }
@@ -1061,7 +952,7 @@ bool MatchesSetPosition(
 
 std::vector<CalendarEvent> ExpandRecurringEvent(
     const CalendarEvent& base, std::string_view ruleText,
-    const std::set<long long>& excludedDays, const std::set<long long>& additionalDays)
+    const std::set<long long>& excludedDays, const std::set<long long>& additionalDays, int viewYear = 0)
 {
     if (ruleText.empty() && additionalDays.empty())
         return {base};
@@ -1072,8 +963,9 @@ std::vector<CalendarEvent> ExpandRecurringEvent(
 
     SYSTEMTIME now{};
     GetLocalTime(&now);
-    const long long rangeStart = DayNumber(now.wYear - 2, 1, 1);
-    const long long rangeEnd = DayNumber(now.wYear + 10, 12, 31);
+    if (!viewYear) viewYear = now.wYear;
+    const long long rangeStart = DayNumber(std::max(1601, viewYear - 2), 1, 1);
+    const long long rangeEnd = DayNumber(std::min(9999, viewYear + 10), 12, 31);
     const long long baseDay = DayNumber(base.startYear, base.startMonth, base.startDay);
     long long endDay = DayNumber(base.endYear, base.endMonth, base.endDay);
     const long long durationDays = std::max(0LL, endDay - baseDay);
@@ -1094,7 +986,7 @@ std::vector<CalendarEvent> ExpandRecurringEvent(
             ++generated;
             if (candidate >= rangeStart && !excludedDays.contains(candidate))
                 occurrenceDays.insert(candidate);
-            if ((rule.count > 0 && generated >= rule.count) || generated >= 20000)
+            if (rule.count > 0 && generated >= rule.count)
                 break;
         }
     }
@@ -1133,7 +1025,7 @@ std::wstring DecodeIcsText(std::string_view value)
     return Utf8ToWide(decoded);
 }
 
-std::vector<CalendarEvent> ParseIcs(std::string_view content)
+std::vector<CalendarEvent> ParseIcs(std::string_view content, int viewYear = 0)
 {
     const EmbeddedTimeZones embeddedTimeZones = ParseEmbeddedTimeZones(content);
     struct Component
@@ -1251,7 +1143,7 @@ std::vector<CalendarEvent> ParseIcs(std::string_view content)
             continue;
         }
         auto expanded = ExpandRecurringEvent(component.event, component.rule,
-            component.excluded, component.additional);
+            component.excluded, component.additional, viewYear);
         for (auto& event : expanded)
         {
             const auto found = overrides.find(component.uid);
@@ -1425,8 +1317,100 @@ winrt::Windows::Foundation::DateTime LocalMonthStart(int year, int month)
 
 namespace wincal
 {
+bool CalendarData::RequestIcsYear(int year)
+{
+    if (year < 1601 || year > 9999) return false;
+    const std::lock_guard lock(mutex_);
+    if (requestedIcsYear_ == year) return false;
+    requestedIcsYear_ = year;
+    return usesIcs_ && loadedIcsYear_ != year;
+}
+
+bool CalendarData::RequestHolidayYear(int year)
+{
+    if (year < 2004 || year > 9999) return false;
+    {
+        const std::lock_guard lock(mutex_);
+        if (holidayYears_.contains(year)) return false;
+        holidayYears_.emplace(year, ChinaHolidayYear{});
+    }
+    const auto base = LocalAppData();
+    if (!base.empty())
+    {
+        const auto path = base / L"WinCal" / L"cache" / L"holidays" / (std::to_wstring(year) + L".json");
+        const bool loaded = LoadHolidayYear(year, ReadFile(path));
+        static_cast<void>(loaded);
+    }
+    return true;
+}
+
+bool CalendarData::LoadHolidayYear(int year, std::string_view content)
+{
+    auto parsed = ParseChinaHolidayYear(content, year);
+    if (!parsed) return false;
+    const std::lock_guard lock(mutex_);
+    holidayYears_[year] = std::move(*parsed);
+    return true;
+}
+
+bool CalendarData::RefreshHolidaysFromNetwork(std::stop_token stopToken)
+{
+    const auto base = LocalAppData();
+    if (base.empty()) return false;
+    std::vector<int> requested;
+    {
+        const std::lock_guard lock(mutex_);
+        for (const auto& [year, days] : holidayYears_)
+        {
+            static_cast<void>(days);
+            requested.push_back(year);
+        }
+    }
+    bool updated{};
+    for (int year : requested)
+    {
+        if (stopToken.stop_requested()) break;
+        const auto path = base / L"WinCal" / L"cache" / L"holidays" / (std::to_wstring(year) + L".json");
+        std::error_code error;
+        const auto modified = std::filesystem::last_write_time(path, error);
+        {
+            const std::lock_guard lock(mutex_);
+            if (!holidayYears_[year].empty() && !error &&
+                CacheIsFresh(modified, decltype(modified)::clock::now(), std::chrono::minutes(1440)))
+                continue;
+            const auto attempt = holidayAttempts_.find(year);
+            if (attempt != holidayAttempts_.end() &&
+                CacheIsFresh(attempt->second, std::chrono::steady_clock::now(), std::chrono::minutes(60)))
+                continue;
+            holidayAttempts_[year] = std::chrono::steady_clock::now();
+        }
+        const auto content = DownloadUrl(L"https://timor.tech/api/holiday/year/" + std::to_wstring(year), stopToken);
+        if (stopToken.stop_requested()) break;
+        if (!LoadHolidayYear(year, content)) continue;
+        // Usable network results can still be shown when the cache cannot be written.
+        const bool cached = WriteFileAtomically(path, content);
+        static_cast<void>(cached);
+        updated = true;
+    }
+    return updated;
+}
+
+std::wstring CalendarData::HolidayNameForDate(int year, int month, int day) const
+{
+    const std::lock_guard lock(mutex_);
+    const auto foundYear = holidayYears_.find(year);
+    if (foundYear == holidayYears_.end()) return {};
+    const auto found = foundYear->second.find(year * 10000 + month * 100 + day);
+    return found == foundYear->second.end() ? std::wstring{} : found->second.name;
+}
+
 void CalendarData::Load()
 {
+    int viewYear{};
+    {
+        const std::lock_guard lock(mutex_);
+        viewYear = requestedIcsYear_;
+    }
     std::vector<CalendarEvent> loadedIcsEvents;
     std::vector<Subscription> loadedSubscriptions;
     bool loadedUsesIcs{};
@@ -1472,7 +1456,7 @@ void CalendarData::Load()
 
                 for (const auto& path : cacheFiles)
                 {
-                    auto parsed = ParseIcs(ReadFile(path));
+                    auto parsed = ParseIcs(ReadFile(path), viewYear);
                     loadedIcsEvents.insert(
                         loadedIcsEvents.end(),
                         std::make_move_iterator(parsed.begin()),
@@ -1507,11 +1491,19 @@ void CalendarData::Load()
     usesSystemCalendar_ = loadedUsesSystemCalendar;
     refreshMinutes_ = loadedRefreshMinutes;
     upcomingDays_ = loadedUpcomingDays;
+    loadedIcsYear_ = viewYear;
     RebuildEventsLocked();
 }
 
 bool CalendarData::RefreshFromNetwork(std::stop_token stopToken)
 {
+    bool rangeUpdated{};
+    {
+        const std::lock_guard lock(mutex_);
+        rangeUpdated = usesIcs_ && requestedIcsYear_ != loadedIcsYear_;
+    }
+    if (rangeUpdated && !stopToken.stop_requested()) Load();
+    const bool holidaysUpdated = RefreshHolidaysFromNetwork(stopToken);
     std::vector<Subscription> subscriptions;
     int refreshMinutes{};
     {
@@ -1542,13 +1534,13 @@ bool CalendarData::RefreshFromNetwork(std::stop_token stopToken)
             continue;
 
         // 完整下载并验证后才替换旧缓存，失败时继续使用原文件。
-        if (ReplaceFileAtomically(subscription.cachePath, content))
+        if (WriteFileAtomically(subscription.cachePath, content))
             updated = true;
     }
 
     if (updated && !stopToken.stop_requested())
         Load();
-    return updated;
+    return updated || holidaysUpdated || rangeUpdated;
 }
 
 bool CalendarData::RefreshSystemCalendar(int year, int month, std::stop_token stopToken)
@@ -1581,7 +1573,7 @@ bool CalendarData::RefreshSystemCalendar(int year, int month, std::stop_token st
         if (store && !stopToken.stop_requested())
         {
             FindAppointmentsOptions options;
-            options.MaxCount(1000);
+            options.MaxCount(std::numeric_limits<uint32_t>::max());
             const auto rangeStart = LocalMonthStart(year, month) - std::chrono::hours(24 * 31);
             const auto rangeLength = std::chrono::duration_cast<
                 winrt::Windows::Foundation::TimeSpan>(
@@ -1700,6 +1692,12 @@ std::vector<CalendarEvent> CalendarData::EventsForDate(int year, int month, int 
 ScheduleLabel CalendarData::ScheduleForDate(int year, int month, int day) const
 {
     const std::lock_guard lock(mutex_);
+    if (const auto foundYear = holidayYears_.find(year); foundYear != holidayYears_.end())
+    {
+        const auto found = foundYear->second.find(year * 10000 + month * 100 + day);
+        if (found != foundYear->second.end())
+            return found->second.offDay ? ScheduleLabel::Rest : ScheduleLabel::Work;
+    }
     bool rest{};
     for (const auto& event : events_)
     {

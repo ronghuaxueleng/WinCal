@@ -6,6 +6,7 @@ WinCal 的主工程是原生 Win32/C++ 版本。旧版 WPF 工程已冻结并归
 
 ## 已实现
 
+- 顶部独立的实时时钟与天气区域，显示秒、日期、农历、温度及天气图标；北京默认回退，支持自动定位和固定北京
 - Win32 托盘图标与左键开关、右键菜单
 - 点击 Windows 任务栏日期/时钟区域时拦截系统日历并显示 WinCal
 - 再次点击托盘关闭面板，点击面板外部自动收起
@@ -16,7 +17,8 @@ WinCal 的主工程是原生 Win32/C++ 版本。旧版 WPF 工程已冻结并归
 - 方向键切换月份/年份，鼠标滚轮切换月份；「整月翻滚」开启时新既单月整页上下滑动（相邻月按需即时渲染），关闭时按滚轮位移连续滚动，不吸附月份或周行（年切换仍为淡入）
 - 每次打开恢复当前月份
 - 读取现有设置并从磁盘 ICS 缓存即时展示事件点及“休/班”角标
-- 使用 Windows 中国农历在日期格显示农历日期与常见传统节日，不引入额外常驻组件
+- 使用 Windows 内置 ICU 显示中国农历与常见传统节日，正确处理闰月和腊月二十九除夕；需要 Windows 10 1903 或更新版本
+- 独立获取中国大陆法定节假日与调休，显示节日名称及“休 / 班”角标，无需 ICS 订阅
 - 选中日期有日程时，在日历旁显示独立浮动日程窗；空日期不显示日程窗，列表内滚轮只滚动日程
 - 点击浮动日程窗中的列表项显示原生日程详情；日历关闭时日程窗一同隐藏
 - 原生设置窗口：主题、实时文字大小预览、数据源、ICS 链接与刷新频率、周起始日、整月翻滚
@@ -86,7 +88,50 @@ ctest --test-dir native/build -C Release --output-on-failure
 测试不访问用户配置或日历服务，覆盖跨午夜事件、结束时间边界、重复日程改期和取消、缓存到期、后台重复刷新及停止等待。
 ICS 后台每分钟检查缓存是否达到配置的刷新间隔；系统日历快照有效期为一分钟，并定期重新读取当前显示月份。刷新失败保留上次成功的数据。
 
-## 浮动日程窗
+中国节假日使用第三方[提莫节假日接口](https://timor.tech/api/holiday/year/2026)，正式安排以国务院办公厅通知为准。当前浏览年份及相邻年份按需获取，缓存位于 `%LOCALAPPDATA%\WinCal\cache\holidays\年份.json`，有效期一天，失败后一小时重试并保留旧数据。尚未公布的年份不推算放假或补班，普通周末不额外标记。独立节假日数据优先于 ICS 标题识别，不添加个人日程或事件圆点。
+
+数据回归还覆盖节假日解析、错误响应保留旧数据、Unicode 代理对及远年份重复日程；核心回归覆盖农历闰月、除夕和原子保存失败时保留旧配置。两组均由 CTest 执行，不访问用户配置或联网。可单独验证真实接口（需要联网）：
+
+```powershell
+.\native\build\Release\WinCalCalendarTests.exe --holiday-year 2026
+```
+
+如需离屏检查真实节假日角标，可把响应保存到构建目录后渲染（参数依次为 DPI、深色开关、翻页方向、起始年、起始月、数据文件、输出文件；下面从九月翻到十月）：
+
+```powershell
+.\native\build\Release\WinCalCalendarTests.exe --holiday-year 2026 native/build/holidays-2026.json
+cmake --build native/build --config Release --target WinCalSettingsPreview
+.\native\build\Release\WinCalSettingsPreview.exe --holidays 144 0 1 2026 9 native/build/holidays-2026.json native/build/holidays-2026.bmp
+```
+
+ICS 重复事件在浏览年份前两年至后十年的窗口内展开，跨年份浏览时从本地缓存重新展开；系统日历查询不再额外截断为一千条。
+
+## 时钟与天气
+
+顶部时钟使用系统本地时间，每秒更新；关闭日历时停止时钟计时器。右上角天气通过 Open-Meteo 获取：优先使用 Windows 位置服务（由系统控制权限），失败时使用 ipwho.is 网络大致位置，仍失败则回退北京。点击天气可以查看当前位置来源和更新时间、切换“自动定位 / 固定北京”、手动刷新；选择保存在 `WeatherAutoLocation` 设置项。
+
+天气在独立后台线程中每 15 分钟更新，失败每 5 分钟重试。缓存位于 `%LOCALAPPDATA%\WinCal\cache\weather.json`，启动时最多使用一天内的缓存，过期或刷新失败的数据标为“缓存”，不把旧天气当作实时结果。网络定位受代理或 VPN 出口影响；Open-Meteo 会接收用于天气查询的经纬度。系统定位只显示“当前位置”，网络定位显示接口返回的城市名。
+
+天气回归测试已注册到 CTest，默认仅使用固定数据和独立临时目录，不联网、不访问用户位置。可显式检查真实接口和定位：
+
+```powershell
+cmake --build native/build --config Release --target WinCalWeatherTests
+.\native\build\Release\WinCalWeatherTests.exe --live-beijing
+.\native\build\Release\WinCalWeatherTests.exe --live-auto
+```
+
+离屏日历预览使用固定的时间和北京天气数据，实际程序使用系统时间和联网结果。
+
+## 年月选择与日程
+
+顶部年月可以点击：第一次打开十二个月份面板，再点击年份打开十二年选择面板。标题旁的展开图标与翻页按钮分开排列，右侧箭头切换月份、年份或年份区间，最右侧的圆心图标返回今天。选好年份后选择月份即可跳转，Esc 关闭面板并保留原来月份。面板支持方向键移动、Enter 选择、PageUp/PageDown 翻页。
+
+```powershell
+cmake --build native/build --config Release --target WinCalSettingsPreview
+.\native\build\Release\WinCalSettingsPreview.exe --check-picker
+# DPI、深色开关、面板（0 月份 / 1 年份）、输出文件
+.\native\build\Release\WinCalSettingsPreview.exe --picker 144 0 0 native/build/month-picker.bmp
+```
 
 日历保持固定高度，网格下方预留 48 DIP 留白；浮动日程窗与日历等高，不随日程数量改变高度。默认选中今天；选中日期有日程时自动显示浮动日程窗，空日期则隐藏。浮窗优先放在日历右侧，空间不足时放在左侧；两侧都不足时尝试上下放置并限制在当前显示器工作区内。每项显示标题及时间（全天事件显示“全天”），最多同时显示五项，滚轮查看更多，点击打开详情。点击外部或按 Esc 收起日历及日程窗。
 
@@ -110,3 +155,42 @@ cmake --build native/build --config Release --target WinCalSettingsPreview
 .\native\build\Release\WinCalSettingsPreview.exe --check-continuous
 .\native\build\Release\WinCalSettingsPreview.exe --continuous 96 0 1 2026 9 0.5 native/out/continuous.bmp
 ```
+
+## 任务栏时钟扩展
+
+`third_party/windhawk-clock` 包含 m417z 的 Taskbar Clock Customization 1.8.1 源码（GPL-3.0）。CMake 编译 `WinCalTaskbarClock.dll` 和无界面的 x86 宿主 `WinCalTaskbarHost.exe`，使用 Windhawk 1.7.3 引擎 DLL。引擎的会话入口需要 x86 宿主，Explorer 和时钟模块仍为 x64；不启动 Windhawk 管理器或编辑器。
+
+扩展在系统时钟原位显示双行内容并为托盘让位。天气和农历来自 WinCal 的本机只读接口 `127.0.0.1:17864/wincal`，时间由扩展每秒更新。关闭任务栏时钟开关或退出 WinCal 后卸载扩展，恢复系统时钟。
+
+准备扩展时，从签名有效的 Windhawk 1.7.3 官方安装包中提取引擎，不执行安装包；需要本机 7-Zip：
+
+```powershell
+./native/tools/install-taskbar-extension.ps1 -InstallerPath ./native/build/windhawk_setup.exe -ModLibraryPath ./native/build/Release/WinCalTaskbarClock.dll -SevenZipPath 'C:/Program Files/7-Zip/7z.exe'
+```
+
+引擎与配置存放在 `%LOCALAPPDATA%\WinCal\TaskbarExtension`。
+
+“设置 → 常规 → 显示格式”支持两行模板、编辑预览与保存。采用软媒时间的月份/分钟约定，而非 .NET 格式：
+
+| 标记 | 含义 |
+| --- | --- |
+| `yyyy` / `yy` | 四位 / 两位公历年 |
+| `mm` / `m` / `dd` / `d` | 公历月、日，有 / 无前导零 |
+| `HH` / `hh` / `ff` / `ss` | 24 小时 / 12 小时 / 分钟 / 秒；单字符版本不补零 |
+| `ddd` / `dddd` | 周二 / 星期二 |
+| `tt` / `TT` | AM、PM / 上午、下午 |
+| `MD` / `M` / `D` | 农历月日 / 农历月 / 农历日 |
+| `rtm` / `rhu` / `rwd` | 实时温度 / 湿度 / 风向与蒲福风级 |
+| `we1`～`we7` | 今天起第 1～7 天的天气 |
+| `tl1`～`tl7` / `th1`～`th7` | 对应日期的最低 / 最高温 |
+| `pos` / `shichen` / `weather` / `icn` | 城市 / 时辰 / 天气与温度 / 天气符号 |
+| `\n` | 两行分隔；也可在编辑框中按回车 |
+| `'文字'` | 原样文字；`''` 输出单引号 |
+
+缺少天气数据时显示 `—`。天气通常每 15 分钟更新，扩展每分钟读取最新天气字段。示例：
+
+```text
+yyyy-mm-dd HH:ff:ss rhu\nMD ddd rtm we2 rwd
+```
+
+标记含义核对了[软媒教程](https://www.win7china.com/html/22143.html)、[论坛使用讨论](https://www.52pojie.cn/thread-1162501-1-1.html)及软媒时间 3.2.0.0 的 `xmls/timeformat.xml` 帮助资源。下载包仅用于解包读取说明，未运行，产品不集成软媒程序或资源。

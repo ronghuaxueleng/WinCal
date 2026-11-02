@@ -1,0 +1,7 @@
+LIBRARY WinCalTaskbarClock
+EXPORTS
+    _Z10Wh_ModInitv=WinCalModInit
+    _Z15Wh_ModAfterInitv=WinCalModAfterInit
+    _Z18Wh_ModBeforeUninitv=WinCalModBeforeUninit
+    _Z12Wh_ModUninitv=WinCalModUninit
+    _Z21Wh_ModSettingsChangedPi=WinCalModSettingsChanged

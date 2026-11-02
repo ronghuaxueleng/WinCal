@@ -2,19 +2,15 @@
 
 #include <windows.h>
 
-#include <winrt/base.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.Globalization.h>
+#include <icu.h>
+#include <chrono>
+#include <memory>
 
 #include <array>
 #include <string_view>
 
 namespace
 {
-using winrt::Windows::Globalization::Calendar;
-using winrt::Windows::Globalization::CalendarIdentifiers;
-using winrt::Windows::Globalization::ClockIdentifiers;
-
 std::wstring_view LunarMonthName(int month)
 {
     static constexpr std::array<std::wstring_view, 13> names{
@@ -44,38 +40,8 @@ std::wstring FestivalName(int month, int day, bool leapMonth)
     case 707: return L"七夕";
     case 815: return L"中秋节";
     case 909: return L"重阳节";
-    case 1230: return L"除夕";
     default: return {};
     }
-}
-
-winrt::Windows::Foundation::DateTime LocalNoon(int year, int month, int day)
-{
-    SYSTEMTIME local{};
-    local.wYear = static_cast<WORD>(year);
-    local.wMonth = static_cast<WORD>(month);
-    local.wDay = static_cast<WORD>(day);
-    local.wHour = 12;
-    SYSTEMTIME utc{};
-    FILETIME fileTime{};
-    if (!TzSpecificLocalTimeToSystemTimeEx(nullptr, &local, &utc) ||
-        !SystemTimeToFileTime(&utc, &fileTime))
-    {
-        return winrt::clock::now();
-    }
-
-    ULARGE_INTEGER value{};
-    value.LowPart = fileTime.dwLowDateTime;
-    value.HighPart = fileTime.dwHighDateTime;
-    return winrt::clock::from_file_time(winrt::file_time{value.QuadPart});
-}
-
-Calendar CreateChineseCalendar()
-{
-    auto languages = winrt::single_threaded_vector<winrt::hstring>();
-    languages.Append(L"zh-Hans-CN");
-    // 使用系统当前时区；Windows 时区键（例如 China Standard Time）不能直接传给此 API。
-    return Calendar(languages, CalendarIdentifiers::ChineseLunar(), ClockIdentifiers::TwentyFourHour());
 }
 }
 
@@ -90,14 +56,37 @@ std::wstring LunarCalendar::TextForDate(int year, int month, int day)
     std::wstring text;
     try
     {
-        static Calendar calendar = CreateChineseCalendar();
-        calendar.SetDateTime(LocalNoon(year, month, day));
-        const int lunarDay = calendar.Day();
-        const std::wstring lunarMonthName = calendar.MonthAsString().c_str();
-        const bool isLeapMonth = lunarMonthName.find(L"闰") != std::wstring::npos;
-        const int lunarMonth = calendar.Month();
+        // Windows ICU exposes the actual lunar month and leap flag. WinRT's
+        // Chinese calendar only exposes an ordinal month (1..13), even in names.
+        using CalendarPointer = std::unique_ptr<UCalendar, decltype(&ucal_close)>;
+        static CalendarPointer calendar{[]
+        {
+            UErrorCode status = U_ZERO_ERROR;
+            return ucal_open(u"Asia/Shanghai", -1, "zh_CN@calendar=chinese", UCAL_DEFAULT, &status);
+        }(), &ucal_close};
+        if (!calendar) return {};
+        const std::chrono::year_month_day date{std::chrono::year{year},
+            std::chrono::month{static_cast<unsigned>(month)}, std::chrono::day{static_cast<unsigned>(day)}};
+        if (!date.ok()) return {};
+        const auto noon = std::chrono::sys_days{date} + std::chrono::hours(4); // Noon in China.
+        UErrorCode status = U_ZERO_ERROR;
+        ucal_setMillis(calendar.get(), static_cast<UDate>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(noon.time_since_epoch()).count()), &status);
+        const int lunarDay = ucal_get(calendar.get(), UCAL_DATE, &status);
+        const int lunarMonth = ucal_get(calendar.get(), UCAL_MONTH, &status) + 1;
+        const bool isLeapMonth = ucal_get(calendar.get(), UCAL_IS_LEAP_MONTH, &status) != 0;
+        ucal_add(calendar.get(), UCAL_DATE, 1, &status);
+        const bool newYearsEve = ucal_get(calendar.get(), UCAL_MONTH, &status) == 0 &&
+            ucal_get(calendar.get(), UCAL_DATE, &status) == 1 &&
+            ucal_get(calendar.get(), UCAL_IS_LEAP_MONTH, &status) == 0;
+        if (U_FAILURE(status)) return {};
+        if (fullCache_.size() >= 512) fullCache_.clear();
+        fullCache_[key] = (isLeapMonth ? L"闰" : L"") + std::wstring(LunarMonthName(lunarMonth)) +
+            std::wstring(LunarDayName(lunarDay));
 
-        if (const auto festival = FestivalName(lunarMonth, lunarDay, isLeapMonth); !festival.empty())
+        if (newYearsEve)
+            text = L"除夕";
+        else if (const auto festival = FestivalName(lunarMonth, lunarDay, isLeapMonth); !festival.empty())
             text = festival;
         else if (lunarDay == 1 && lunarMonth > 0)
             text = isLeapMonth ? L"闰" + std::wstring(LunarMonthName(lunarMonth))
@@ -115,5 +104,15 @@ std::wstring LunarCalendar::TextForDate(int year, int month, int day)
         cache_.clear();
     cache_.emplace(key, text);
     return text;
+}
+
+std::wstring LunarCalendar::FullTextForDate(int year, int month, int day)
+{
+    const auto key = std::tuple{year, month, day};
+    if (const auto found = fullCache_.find(key); found != fullCache_.end()) return found->second;
+    cache_.erase(key);
+    static_cast<void>(TextForDate(year, month, day));
+    if (const auto found = fullCache_.find(key); found != fullCache_.end()) return found->second;
+    return {};
 }
 }

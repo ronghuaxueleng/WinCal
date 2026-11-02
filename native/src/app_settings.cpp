@@ -1,3 +1,5 @@
+#include "atomic_file.h"
+#include "json_text.h"
 #include "app_settings.h"
 
 #include <windows.h>
@@ -64,60 +66,6 @@ int HexDigit(char value)
     return -1;
 }
 
-void AppendUtf8(std::string& output, unsigned codepoint)
-{
-    if (codepoint <= 0x7F) output.push_back(static_cast<char>(codepoint));
-    else if (codepoint <= 0x7FF)
-    {
-        output.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
-        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    }
-    else
-    {
-        output.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
-        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    }
-}
-
-std::string DecodeJsonString(std::string_view value)
-{
-    std::string result;
-    for (size_t index = 0; index < value.size(); ++index)
-    {
-        const char current = value[index];
-        if (current != '\\' || index + 1 >= value.size()) { result += current; continue; }
-        const char escaped = value[++index];
-        switch (escaped)
-        {
-        case '"': result += '"'; break;
-        case '\\': result += '\\'; break;
-        case '/': result += '/'; break;
-        case 'b': result += '\b'; break;
-        case 'f': result += '\f'; break;
-        case 'n': result += '\n'; break;
-        case 'r': result += '\r'; break;
-        case 't': result += '\t'; break;
-        case 'u':
-        {
-            if (index + 4 >= value.size()) break;
-            unsigned codepoint{};
-            bool valid = true;
-            for (int digit = 0; digit < 4; ++digit)
-            {
-                const int valueDigit = HexDigit(value[index + 1 + digit]);
-                if (valueDigit < 0) { valid = false; break; }
-                codepoint = codepoint * 16 + static_cast<unsigned>(valueDigit);
-            }
-            if (valid) { AppendUtf8(result, codepoint); index += 4; }
-            break;
-        }
-        default: result += escaped; break;
-        }
-    }
-    return result;
-}
-
 std::string StringValue(std::string_view json, std::string_view key, std::string fallback = {})
 {
     const auto start = FindValue(json, key);
@@ -126,7 +74,7 @@ std::string StringValue(std::string_view json, std::string_view key, std::string
     for (size_t i = start + 1; i < json.size(); ++i)
     {
         const char c = json[i];
-        if (!escaped && c == '"') return DecodeJsonString(json.substr(start + 1, i - start - 1));
+        if (!escaped && c == '"') return wincal::DecodeJsonText(json.substr(start + 1, i - start - 1));
         if (!escaped && c == '\\') { escaped = true; continue; }
         if (escaped) escaped = false;
     }
@@ -167,7 +115,7 @@ std::vector<std::wstring> StringArray(std::string_view json, std::string_view ke
         {
             if (!escaped && json[position] == '"')
             {
-                values.push_back(Utf8ToWide(DecodeJsonString(json.substr(start, position - start))));
+                values.push_back(Utf8ToWide(wincal::DecodeJsonText(json.substr(start, position - start))));
                 ++position;
                 break;
             }
@@ -190,7 +138,18 @@ std::string EscapeJson(std::wstring_view value)
         case '\n': output += "\\n"; break;
         case '\r': output += "\\r"; break;
         case '\t': output += "\\t"; break;
-        default: output += c; break;
+        case '\b': output += "\\b"; break;
+        case '\f': output += "\\f"; break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20)
+            {
+                constexpr char hex[] = "0123456789abcdef";
+                output += "\\u00";
+                output += hex[static_cast<unsigned char>(c) >> 4];
+                output += hex[static_cast<unsigned char>(c) & 15];
+            }
+            else output += c;
+            break;
         }
     }
     return output;
@@ -237,6 +196,10 @@ AppSettings SettingsStore::Load()
     settings.upcomingDays = std::clamp(IntegerValue(content, "UpcomingDays", 3), 1, 30);
     settings.weekStartDay = Utf8ToWide(StringValue(content, "WeekStartDay", "Sunday"));
     settings.monthPaging = BoolValue(content, "MonthPaging", true);
+    settings.weatherAutoLocation = BoolValue(content, "WeatherAutoLocation", true);
+    settings.taskbarStatus = BoolValue(content, "TaskbarStatus", true);
+    const auto taskbarFormat = StringValue(content, "TaskbarFormat", "");
+    if (!taskbarFormat.empty()) settings.taskbarFormat = Utf8ToWide(taskbarFormat);
     return settings;
 }
 
@@ -257,9 +220,10 @@ bool SettingsStore::Save(const AppSettings& settings)
     json += "  \"IcsRefreshMinutes\": " + std::to_string(settings.icsRefreshMinutes) + ",\n";
     json += "  \"UpcomingDays\": " + std::to_string(settings.upcomingDays) + ",\n";
     json += "  \"WeekStartDay\": \"" + EscapeJson(settings.weekStartDay) + "\",\n";
-    json += "  \"MonthPaging\": " + std::string(settings.monthPaging ? "true" : "false") + "\n}\n";
-    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-    stream.write(json.data(), static_cast<std::streamsize>(json.size()));
-    return static_cast<bool>(stream);
+    json += "  \"MonthPaging\": " + std::string(settings.monthPaging ? "true" : "false") + ",\n";
+    json += "  \"WeatherAutoLocation\": " + std::string(settings.weatherAutoLocation ? "true" : "false") + ",\n";
+    json += "  \"TaskbarStatus\": " + std::string(settings.taskbarStatus ? "true" : "false") + ",\n";
+    json += "  \"TaskbarFormat\": \"" + EscapeJson(settings.taskbarFormat) + "\"\n}\n";
+    return WriteFileAtomically(path, json);
 }
 }
