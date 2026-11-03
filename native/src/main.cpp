@@ -60,11 +60,11 @@ constexpr UINT kTaskbarClockClickMessage = WM_APP + 7;
 constexpr UINT kWeatherUpdatedMessage = WM_APP + 8;
 constexpr UINT kTaskbarClockContextMenuMessage = WM_APP + 9;
 constexpr UINT kDismissContextMenuMessage = WM_APP + 10;
+constexpr UINT kClockBoundsUpdatedMessage = WM_APP + 11;
 constexpr UINT kAnimationTimer = 1;
 constexpr UINT kOutsideClickTimer = 2;
 constexpr UINT kCalendarRefreshTimer = 3;
 constexpr UINT kClockTimer = 4;
-constexpr UINT kTaskbarBoundsTimer = 5;
 constexpr UINT kShutdownTimer = 6;
 constexpr int kShutdownInput = 2100;
 constexpr DWORD kEventObjectUncloak = 0x8018;
@@ -476,6 +476,7 @@ public:
         instance_ = instance;
         if (!RegisterWindowClass() || !CreateMainWindow()) return false;
         ToggleTools();
+        OpenShutdownTool();
         bool ok = toolsOpen_ && IsWindow(toolInput_);
         SetWindowTextW(toolInput_, L"0");
         StartShutdownSchedule();
@@ -1028,7 +1029,6 @@ public:
         StartSystemCalendarInterceptor();
         RefreshTaskbarClockBounds();
         StartGlobalMouseMonitor();
-        SetTimer(window_, kTaskbarBoundsTimer, 2000, nullptr);
         StartCalendarRefresh();
         SetTimer(window_, kCalendarRefreshTimer, 60000, nullptr);
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
@@ -2185,6 +2185,7 @@ private:
     void HidePopup(HideReason reason)
     {
         toolsOpen_ = false;
+        if (IsWindow(toolsWindow_)) ShowWindow(toolsWindow_, SW_HIDE);
         if (IsWindow(toolInput_)) ShowWindow(toolInput_, SW_HIDE);
         KillTimer(window_, kClockTimer);
         weatherPanelOpen_ = false;
@@ -2342,17 +2343,54 @@ private:
 
     void RefreshTaskbarClockBounds()
     {
-        taskbarClockBounds_.clear();
-        const auto append = [this](HWND taskbar)
         {
-            for (const auto& bounds : wincal::TaskbarClockBounds(taskbar))
-                if (bounds.right > bounds.left && bounds.bottom > bounds.top)
-                    taskbarClockBounds_.emplace_back(taskbar, bounds);
-        };
-        append(FindWindowW(L"Shell_TrayWnd", nullptr));
-        HWND secondary{};
-        while ((secondary = FindWindowExW(nullptr, secondary, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr)
-            append(secondary);
+            const std::lock_guard lock(clockBoundsMutex_);
+            clockBoundsRequested_ = true;
+        }
+        if (clockBoundsThread_.joinable())
+        {
+            clockBoundsWake_.notify_all();
+            return;
+        }
+        clockBoundsThread_ = std::jthread([this](std::stop_token stop)
+        {
+            if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
+            std::unique_lock lock(clockBoundsMutex_);
+            while (!stop.stop_requested())
+            {
+                clockBoundsRequested_ = false;
+                lock.unlock();
+                std::vector<std::pair<HWND, RECT>> discovered;
+                const auto append = [&](HWND taskbar)
+                {
+                    if (!taskbar) return;
+                    for (const auto& bounds : wincal::TaskbarClockBounds(taskbar))
+                        if (bounds.right > bounds.left && bounds.bottom > bounds.top)
+                            discovered.emplace_back(taskbar, bounds);
+                };
+                append(FindWindowW(L"Shell_TrayWnd", nullptr));
+                HWND secondary{};
+                while (!stop.stop_requested() && (secondary = FindWindowExW(
+                    nullptr, secondary, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr)
+                    append(secondary);
+                lock.lock();
+                if (stop.stop_requested()) break;
+                pendingClockBounds_ = std::move(discovered);
+                PostMessageW(window_, kClockBoundsUpdatedMessage, 0, 0);
+                clockBoundsWake_.wait_for(lock, stop, std::chrono::seconds(2),
+                    [this] { return clockBoundsRequested_; });
+            }
+            lock.unlock();
+            CoUninitialize();
+        });
+    }
+
+    void ApplyTaskbarClockBounds()
+    {
+        {
+            const std::lock_guard lock(clockBoundsMutex_);
+            taskbarClockBounds_ = pendingClockBounds_;
+        }
         // Publish exact clock rectangles for the injected tooltip filter. This
         // avoids running UI Automation on Explorer's window-show path.
         SetPropW(window_, L"WinCal.ClockRectCount", nullptr);
@@ -2423,6 +2461,9 @@ private:
         RECT popupRect{};
         if (GetWindowRect(window_, &popupRect) && PtInRect(&popupRect, mouse.pt))
             return false;
+        RECT toolsRect{};
+        if (IsWindowVisible(toolsWindow_) && GetWindowRect(toolsWindow_, &toolsRect) &&
+            PtInRect(&toolsRect, mouse.pt)) return false;
         RECT weatherRect{};
         if (IsWindowVisible(weatherWindow_) && GetWindowRect(weatherWindow_, &weatherRect) &&
             PtInRect(&weatherRect, mouse.pt)) return false;
@@ -4567,15 +4608,51 @@ private:
             bodyFormat_.Get(), footer, theme.muted);
     }
 
+    int ToolPx(int value) const { return MulDiv(value, toolDpi_, 96); }
+
     void LayoutToolInput()
     {
         if (!IsWindow(toolInput_)) return;
-        SetWindowPos(toolInput_, nullptr, static_cast<int>(Scale(48)), static_cast<int>(Scale(354)),
-            static_cast<int>(Scale(330)), static_cast<int>(Scale(28)), SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(toolInput_, nullptr, ToolPx(158), ToolPx(104), ToolPx(330), ToolPx(28),
+            SWP_NOZORDER | SWP_NOACTIVATE);
         if (toolInputFont_) DeleteObject(toolInputFont_);
-        toolInputFont_ = CreateFontW(-static_cast<int>(Scale(17)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        toolInputFont_ = CreateFontW(-ToolPx(17), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
         SendMessageW(toolInput_, WM_SETFONT, reinterpret_cast<WPARAM>(toolInputFont_), TRUE);
+    }
+
+    void PositionTools()
+    {
+        if (!IsWindow(toolsWindow_)) return;
+        RECT calendar{};
+        GetWindowRect(window_, &calendar);
+        MONITORINFO monitor{sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+        toolDpi_ = dpi_;
+        const int width = ToolPx(560), height = calendar.bottom - calendar.top, gap = ToolPx(10);
+        LONG x = calendar.left - width - gap;
+        if (x < monitor.rcWork.left) x = calendar.right + gap;
+        x = std::clamp(x, monitor.rcWork.left, std::max(monitor.rcWork.left, monitor.rcWork.right - width));
+        const LONG y = std::clamp(calendar.top, monitor.rcWork.top,
+            std::max(monitor.rcWork.top, monitor.rcWork.bottom - height));
+        SetWindowPos(toolsWindow_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+        LayoutToolInput();
+    }
+
+    void OpenShutdownTool()
+    {
+        shutdownToolOpen_ = true;
+        if (!IsWindow(toolInput_))
+        {
+            toolInput_ = CreateWindowExW(0, L"EDIT", L"30", WS_CHILD | ES_AUTOHSCROLL | WS_TABSTOP,
+                0, 0, 0, 0, toolsWindow_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShutdownInput)), instance_, nullptr);
+            SendMessageW(toolInput_, EM_SETLIMITTEXT, 5, 0);
+            SetWindowSubclass(toolInput_, ToolInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
+        }
+        LayoutToolInput();
+        ShowWindow(toolInput_, SW_SHOW);
+        SetFocus(toolInput_);
+        InvalidateRect(toolsWindow_, nullptr, FALSE);
     }
 
     void ToggleTools()
@@ -4583,29 +4660,148 @@ private:
         toolsOpen_ = !toolsOpen_;
         if (toolsOpen_)
         {
-            pickerMode_ = DatePickerMode::Closed;
             CloseWeatherForecast();
-            if (!IsWindow(toolInput_))
+            CloseDetailWindow();
+            shutdownToolOpen_ = false;
+            if (!IsWindow(toolsWindow_))
             {
-                toolInput_ = CreateWindowExW(0, L"EDIT", L"30", WS_CHILD | ES_AUTOHSCROLL | WS_TABSTOP,
-                    0, 0, 0, 0, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShutdownInput)), instance_, nullptr);
-                SendMessageW(toolInput_, EM_SETLIMITTEXT, 5, 0);
-                SetWindowSubclass(toolInput_, ToolInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
+                WNDCLASSW wc{};
+                wc.lpfnWndProc = ToolsWindowProc;
+                wc.hInstance = instance_;
+                wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+                wc.lpszClassName = L"WinCalNativeTools";
+                RegisterClassW(&wc);
+                toolsWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"WinCal 工具",
+                    WS_POPUP | WS_CLIPCHILDREN, 0, 0, ToolPx(560), ToolPx(254), window_, nullptr, instance_, this);
             }
-            LayoutToolInput();
+            PositionTools();
+            const BOOL dark = dark_;
+            DwmSetWindowAttribute(toolsWindow_, 20, &dark, sizeof(dark));
+            const DWORD corner = 2;
+            DwmSetWindowAttribute(toolsWindow_, 33, &corner, sizeof(corner));
         }
-        ShowWindow(toolInput_, toolsOpen_ ? SW_SHOW : SW_HIDE);
-        if (toolsOpen_) SetFocus(toolInput_);
-        else SetFocus(window_);
+        if (IsWindow(toolInput_)) ShowWindow(toolInput_, SW_HIDE);
+        ShowWindow(toolsWindow_, toolsOpen_ ? SW_SHOW : SW_HIDE);
+        SetFocus(toolsOpen_ ? toolsWindow_ : window_);
         PresentAgenda();
         InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    static LRESULT CALLBACK ToolsWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (message == WM_NCCREATE)
+        {
+            app = static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+            app->toolsWindow_ = window;
+        }
+        return app ? app->HandleToolsMessage(window, message, wParam, lParam) : DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    LRESULT HandleToolsMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        switch (message)
+        {
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT:
+        {
+            PAINTSTRUCT paint{};
+            BeginPaint(window, &paint);
+            PaintTools();
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORSTATIC:
+            return HandleMessage(message, wParam, lParam);
+        case WM_CLOSE:
+            if (toolsOpen_) ToggleTools();
+            return 0;
+        case WM_SIZE:
+            toolsRenderTarget_.Reset();
+            return 0;
+        case WM_DPICHANGED:
+            toolsRenderTarget_.Reset();
+            PositionTools();
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) BackFromTool();
+            return 0;
+        case WM_LBUTTONUP:
+        {
+            const int localX = MulDiv(GET_X_LPARAM(lParam), 96, toolDpi_);
+            const int localY = MulDiv(GET_Y_LPARAM(lParam), 96, toolDpi_);
+            if (localX >= 520 && localY < 40) { ToggleTools(); return 0; }
+            if (localX >= 16 && localX < 100 && localY >= 50 && localY < 138)
+            {
+                OpenShutdownTool();
+                return 0;
+            }
+            if (!shutdownToolOpen_ || localX < 130 || localX >= 520) return 0;
+            const int x = localX - 110;
+            const int y = localY + 250;
+            if (y >= 300 && y < 334 && !shutdownDue_)
+            {
+                shutdownAtTime_ = x >= 215;
+                SetWindowTextW(toolInput_, shutdownAtTime_ ? L"23:30" : L"30");
+                toolStatus_.clear();
+            }
+            else if (y >= 446 && y < 480)
+            {
+                if (shutdownDue_) CancelShutdownSchedule();
+                else StartShutdownSchedule();
+            }
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        case WM_NCDESTROY:
+            toolsRenderTarget_.Reset();
+            toolsWindow_ = nullptr;
+            toolInput_ = nullptr;
+            break;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    void BackFromTool()
+    {
+        if (!shutdownToolOpen_) { ToggleTools(); return; }
+        shutdownToolOpen_ = false;
+        ShowWindow(toolInput_, SW_HIDE);
+        SetFocus(toolsWindow_);
+        InvalidateRect(toolsWindow_, nullptr, FALSE);
+    }
+
+    void PaintTools()
+    {
+        if (!EnsureDeviceResources()) return;
+        if (!toolsRenderTarget_)
+        {
+            RECT client{};
+            GetClientRect(toolsWindow_, &client);
+            if (FAILED(factory_->CreateHwndRenderTarget(D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(), 96, 96),
+                D2D1::HwndRenderTargetProperties(toolsWindow_, D2D1::SizeU(client.right, client.bottom)),
+                toolsRenderTarget_.ReleaseAndGetAddressOf()))) return;
+        }
+        const auto calendarTarget = renderTarget_;
+        renderTarget_ = toolsRenderTarget_;
+        const auto theme = GetTheme(dark_);
+        renderTarget_->BeginDraw();
+        renderTarget_->Clear(theme.background);
+        renderTarget_->SetTransform(D2D1::Matrix3x2F::Translation(-Scale(20), -Scale(250)));
+        DrawToolPanel(theme);
+        if (renderTarget_->EndDraw() == D2DERR_RECREATE_TARGET) toolsRenderTarget_.Reset();
+        renderTarget_ = calendarTarget;
     }
 
     static LRESULT CALLBACK ToolInputProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
                                           UINT_PTR, DWORD_PTR data)
     {
         auto* app = reinterpret_cast<App*>(data);
-        if (message == WM_KEYDOWN && wParam == VK_ESCAPE) { app->ToggleTools(); return 0; }
+        if (message == WM_KEYDOWN && wParam == VK_ESCAPE) { app->BackFromTool(); return 0; }
         if (message == WM_KEYDOWN && wParam == VK_RETURN) { app->StartShutdownSchedule(); return 0; }
         return DefSubclassProc(window, message, wParam, lParam);
     }
@@ -4627,6 +4823,7 @@ private:
             toolStatus_.clear();
             SendMessageW(toolInput_, EM_SETREADONLY, TRUE, 0);
         }
+        if (IsWindow(toolsWindow_)) InvalidateRect(toolsWindow_, nullptr, FALSE);
         InvalidateRect(window_, nullptr, FALSE);
     }
 
@@ -4636,6 +4833,7 @@ private:
         KillTimer(window_, kShutdownTimer);
         SendMessageW(toolInput_, EM_SETREADONLY, FALSE, 0);
         toolStatus_ = L"定时关机已取消。";
+        if (IsWindow(toolsWindow_)) InvalidateRect(toolsWindow_, nullptr, FALSE);
         InvalidateRect(window_, nullptr, FALSE);
     }
 
@@ -4666,6 +4864,7 @@ private:
                 toolStatus_ = L"关机请求失败，请检查系统权限。";
             }
         }
+        if (IsWindow(toolsWindow_)) InvalidateRect(toolsWindow_, nullptr, FALSE);
         InvalidateRect(window_, nullptr, FALSE);
     }
 
@@ -4680,17 +4879,25 @@ private:
     int HitTestTools(int x, int y) const
     {
         const float px = x / Scale(1), py = y / Scale(1);
-        if (py >= 510 && py < 546 && px >= 20 && px < 410) return px < 215 ? 1 : 2;
-        if (!toolsOpen_ || px < 20 || px >= 410 || py < 250 || py >= 504) return 0;
-        if (px >= 370 && py < 290) return 3;
-        if (py >= 300 && py < 334) return px < 215 ? 4 : 5;
-        if (py >= 446 && py < 480) return shutdownDue_ ? 7 : 6;
-        return 8; // Consume panel clicks rather than selecting a date underneath.
+        return py >= 510 && py < 546 && px >= 20 && px < 56 ? 2 : 0;
     }
 
     void DrawTools(const Theme& theme)
     {
         renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
+        const auto rect = D2D1::RectF(Scale(22), Scale(514), Scale(54), Scale(544));
+        const auto fill = Brush(theme.hover);
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(7), Scale(7)), fill.Get());
+        const auto ink = Brush(theme.primary);
+        renderTarget_->DrawLine({Scale(31), Scale(529)}, {Scale(45), Scale(529)}, ink.Get(), Scale(1.8f));
+        renderTarget_->DrawLine({Scale(38), Scale(522)}, {Scale(38), Scale(536)}, ink.Get(), Scale(1.8f));
+        if (shutdownDue_)
+            DrawText(L"定时关机计时中", lunarFormat_.Get(),
+                {Scale(66), Scale(514), Scale(264), Scale(544)}, theme.secondary);
+    }
+
+    void DrawToolPanel(const Theme& theme)
+    {
         const auto button = [&](const wchar_t* text, float left, float top, float right, float bottom, bool active)
         {
             const auto rect = D2D1::RectF(Scale(left), Scale(top), Scale(right), Scale(bottom));
@@ -4698,17 +4905,40 @@ private:
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(7), Scale(7)), fill.Get());
             DrawText(text, bodyFormat_.Get(), rect, active ? D2D1::ColorF(0xFFFFFF) : theme.primary);
         };
-        const auto separator = Brush(theme.separator);
-        renderTarget_->DrawLine({Scale(20), Scale(508)}, {Scale(410), Scale(508)}, separator.Get(), Scale(1));
-        button(L"日历", 22, 514, 208, 544, !toolsOpen_);
-        button(shutdownDue_ ? L"工具 · 关机计时中" : L"工具 · 定时关机", 222, 514, 408, 544, toolsOpen_);
-        if (!toolsOpen_) return;
+        {
+            DrawText(L"工具", dayFormat_.Get(), {Scale(36), Scale(260), Scale(130), Scale(290)}, theme.primary);
+            DrawText(L"×", bodyFormat_.Get(), {Scale(540), Scale(258), Scale(572), Scale(290)}, theme.secondary);
+            if (shutdownToolOpen_)
+            {
+                const auto selected = Brush(theme.hover);
+                renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(
+                    {Scale(36), Scale(300), Scale(120), Scale(388)}, Scale(8), Scale(8)), selected.Get());
+            }
+            const auto ink = Brush(theme.accent);
+            renderTarget_->DrawEllipse(D2D1::Ellipse({Scale(78), Scale(326)}, Scale(12), Scale(12)),
+                ink.Get(), Scale(2));
+            renderTarget_->DrawLine({Scale(78), Scale(317)}, {Scale(78), Scale(326)}, ink.Get(), Scale(2));
+            renderTarget_->DrawLine({Scale(78), Scale(326)}, {Scale(85), Scale(326)}, ink.Get(), Scale(2));
+            DrawText(L"定时关机", bodyFormat_.Get(),
+                {Scale(36), Scale(350), Scale(120), Scale(378)}, theme.primary);
+            if (shutdownDue_)
+                renderTarget_->FillEllipse(D2D1::Ellipse({Scale(100), Scale(310)}, Scale(3), Scale(3)), ink.Get());
+        }
+        const auto divider = Brush(theme.separator);
+        renderTarget_->DrawLine({Scale(138), Scale(266)}, {Scale(138), Scale(kLogicalHeight + 234)},
+            divider.Get(), Scale(1));
+        renderTarget_->SetTransform(D2D1::Matrix3x2F::Translation(Scale(110), -Scale(250)));
+        if (!shutdownToolOpen_)
+        {
+            DrawText(L"选择左侧工具查看配置", bodyFormat_.Get(),
+                {Scale(36), Scale(300), Scale(394), Scale(360)}, theme.secondary);
+            return;
+        }
         const auto panel = D2D1::RectF(Scale(20), Scale(250), Scale(410), Scale(504));
         const auto fill = Brush(theme.background);
         renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(panel, Scale(10), Scale(10)), fill.Get());
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(panel, Scale(10), Scale(10)), separator.Get(), Scale(1));
-        DrawText(L"定时关机", dayFormat_.Get(), {Scale(36), Scale(260), Scale(165), Scale(290)}, theme.primary);
-        DrawText(L"×", bodyFormat_.Get(), {Scale(370), Scale(258), Scale(402), Scale(290)}, theme.secondary);
+
+        DrawText(L"定时关机", dayFormat_.Get(), {Scale(36), Scale(260), Scale(185), Scale(290)}, theme.primary);
         button(L"倒计时", 36, 300, 210, 332, !shutdownAtTime_);
         button(L"指定时刻", 220, 300, 394, 332, shutdownAtTime_);
         const auto input = D2D1::RectF(Scale(36), Scale(344), Scale(394), Scale(388));
@@ -4836,6 +5066,8 @@ private:
 
     void DiscardDeviceResources()
     {
+        toolsRenderTarget_.Reset();
+        if (IsWindowVisible(toolsWindow_)) InvalidateRect(toolsWindow_, nullptr, FALSE);
         weatherRenderTarget_.Reset();
         if (IsWindowVisible(weatherWindow_)) InvalidateRect(weatherWindow_, nullptr, FALSE);
         clockFormat_.Reset();
@@ -4889,6 +5121,7 @@ private:
             return 1;
         case WM_MOVE:
             PositionAgenda();
+            PositionTools();
             PositionWeatherForecast();
             return 0;
         case WM_SIZE:
@@ -4959,20 +5192,7 @@ private:
         case WM_LBUTTONUP:
         {
             const int tool = HitTestTools(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-            if (tool)
-            {
-                if ((tool == 1 && toolsOpen_) || tool == 2 || tool == 3) ToggleTools();
-                else if ((tool == 4 || tool == 5) && !shutdownDue_)
-                {
-                    shutdownAtTime_ = tool == 5;
-                    SetWindowTextW(toolInput_, shutdownAtTime_ ? L"23:30" : L"30");
-                    toolStatus_.clear();
-                }
-                else if (tool == 6) StartShutdownSchedule();
-                else if (tool == 7) CancelShutdownSchedule();
-                InvalidateRect(window_, nullptr, FALSE);
-                return 0;
-            }
+            if (tool) { ToggleTools(); return 0; }
             const int navigation = HitTestNavigation(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             if (navigation == -6) { ToggleWeatherForecast(); return 0; }
             if (navigation == -2) { OpenDatePicker(); return 0; }
@@ -5020,7 +5240,6 @@ private:
         }
         case WM_MOUSEWHEEL:
         {
-            if (toolsOpen_) return 0;
             if (pickerMode_ != DatePickerMode::Closed)
             {
                 ChangePickerPage(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
@@ -5033,9 +5252,9 @@ private:
             return 0;
         }
         case WM_KEYDOWN:
-            if (toolsOpen_)
+            if (toolsOpen_ && wParam == VK_ESCAPE)
             {
-                if (wParam == VK_ESCAPE) ToggleTools();
+                ToggleTools();
                 return 0;
             }
             if (pickerMode_ != DatePickerMode::Closed)
@@ -5088,12 +5307,6 @@ private:
                     }
                 }
                 else TickShutdownSchedule();
-                return 0;
-            }
-            if (wParam == kTaskbarBoundsTimer)
-            {
-                KillTimer(window_, kTaskbarBoundsTimer);
-                RefreshTaskbarClockBounds();
                 return 0;
             }
             if (wParam == kClockTimer)
@@ -5180,6 +5393,9 @@ private:
             else if (!settingsLivePreview_ && IsWindowVisible(window_))
                 SetTimer(window_, kOutsideClickTimer, 120, nullptr);
             return 0;
+        case kClockBoundsUpdatedMessage:
+            ApplyTaskbarClockBounds();
+            return 0;
         case kScheduleOutsideHideMessage:
             if (!settingsLivePreview_) SetTimer(window_, kOutsideClickTimer, 120, nullptr);
             return 0;
@@ -5196,8 +5412,10 @@ private:
             ShowSettingsWindow();
             return 0;
         case WM_DESTROY:
+            if (clockBoundsThread_.joinable()) clockBoundsThread_.request_stop();
             KillTimer(window_, kShutdownTimer);
             if (shutdownProcess_) CloseHandle(shutdownProcess_);
+            if (IsWindow(toolsWindow_)) DestroyWindow(toolsWindow_);
             if (toolInputFont_) DeleteObject(toolInputFont_);
             taskbarStatus_.Stop();
             if (IsWindow(weatherWindow_)) DestroyWindow(weatherWindow_);
@@ -5231,6 +5449,10 @@ private:
     HWND contextMenuWindow_{};
     int contextMenuHover_{-1};
     HWND settingsWindow_{};
+    HWND toolsWindow_{};
+    UINT toolDpi_{96};
+    bool shutdownToolOpen_{};
+    ComPtr<ID2D1HwndRenderTarget> toolsRenderTarget_;
     bool toolsOpen_{};
     bool shutdownAtTime_{};
     HWND toolInput_{};
@@ -5275,6 +5497,11 @@ private:
 
     HHOOK mouseHook_{};
     std::vector<std::pair<HWND, RECT>> taskbarClockBounds_;
+    std::vector<std::pair<HWND, RECT>> pendingClockBounds_;
+    std::mutex clockBoundsMutex_;
+    std::condition_variable_any clockBoundsWake_;
+    bool clockBoundsRequested_{};
+    std::jthread clockBoundsThread_;
     HWINEVENTHOOK calendarHook_{};
     std::vector<HWND> hiddenCalendarWindows_;
     std::mutex hiddenCalendarWindowsMutex_;
