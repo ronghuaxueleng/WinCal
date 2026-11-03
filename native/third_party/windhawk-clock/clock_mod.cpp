@@ -1,4 +1,4 @@
-// ==WindhawkMod==
+﻿// ==WindhawkMod==
 // @id              taskbar-clock-customization
 // @name            Taskbar Clock Customization
 // @description     Custom date/time format, news feed, weather, performance metrics (upload/download speed, CPU, RAM, GPU, battery), media player info, custom fonts and colors, and more
@@ -539,6 +539,7 @@ using WindhawkUtils::StringSetting;
 #include <string_view>
 #include <unordered_set>
 #include <vector>
+#include <commctrl.h>
 
 using namespace std::string_view_literals;
 
@@ -6269,6 +6270,90 @@ void ApplySettings() {
     }
 }
 
+decltype(&SetWindowPos) SetWindowPos_Original;
+decltype(&ShowWindow) ShowWindow_Original;
+HHOOK g_clockTooltipMessageHook;
+constexpr UINT kRemoveClockTooltipSubclass = WM_APP + 0x5f01;
+
+bool IsDisabledClockTooltip(HWND window, int width = 0, int height = 0) {
+    if (g_settings.tooltipLineMode != TooltipLineMode::replace ||
+        g_settings.tooltipLine.get()[0]) return false;
+    wchar_t className[64]{};
+    if (!GetClassNameW(window, className, ARRAYSIZE(className)) ||
+        wcscmp(className, L"Xaml_WindowedPopupClass") != 0) return false;
+    RECT bounds{};
+    GetWindowRect(window, &bounds);
+    if (!width) width = bounds.right - bounds.left;
+    if (!height) height = bounds.bottom - bounds.top;
+    if (width <= 0 || height <= 0 || width > 200 || height > 120) return false;
+    const HWND app = FindWindowW(L"WinCalNativePopup", nullptr);
+    if (!app) return false;
+    const auto count = reinterpret_cast<UINT_PTR>(GetPropW(app, L"WinCal.ClockRectCount"));
+    POINT cursor{};
+    if (!GetPhysicalCursorPos(&cursor)) return false;
+    for (UINT_PTR i = 0; i < count; ++i) {
+        LONG coordinates[4]{};
+        for (int part = 0; part < 4; ++part) {
+            const auto name = L"WinCal.ClockRect." + std::to_wstring(i) + L"." + std::to_wstring(part);
+            coordinates[part] = static_cast<LONG>(reinterpret_cast<INT_PTR>(GetPropW(app, name.c_str())));
+        }
+        const RECT clock{coordinates[0], coordinates[1], coordinates[2], coordinates[3]};
+        if (PtInRect(&clock, cursor)) return true;
+    }
+    return false;
+}
+
+BOOL WINAPI SetWindowPos_Hook(HWND window, HWND after, int x, int y, int width, int height, UINT flags) {
+    if ((flags & SWP_SHOWWINDOW) && IsDisabledClockTooltip(window,
+            (flags & SWP_NOSIZE) ? 0 : width, (flags & SWP_NOSIZE) ? 0 : height)) {
+        flags = (flags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+    }
+    return SetWindowPos_Original(window, after, x, y, width, height, flags);
+}
+
+BOOL WINAPI ShowWindow_Hook(HWND window, int command) {
+    if (command != SW_HIDE && IsDisabledClockTooltip(window)) command = SW_HIDE;
+    return ShowWindow_Original(window, command);
+}
+
+LRESULT CALLBACK ClockTooltipSubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
+                                      UINT_PTR, DWORD_PTR) {
+    if (message == kRemoveClockTooltipSubclass || message == WM_NCDESTROY) {
+        RemoveWindowSubclass(window, ClockTooltipSubclass, 1);
+    } else if (message == WM_WINDOWPOSCHANGING) {
+        auto* position = reinterpret_cast<WINDOWPOS*>(lParam);
+        if (IsDisabledClockTooltip(window, (position->flags & SWP_NOSIZE) ? 0 : position->cx,
+                (position->flags & SWP_NOSIZE) ? 0 : position->cy)) {
+            position->flags = (position->flags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+        }
+    }
+    const auto result = DefSubclassProc(window, message, wParam, lParam);
+    if ((message == WM_SHOWWINDOW && wParam) || message == WM_WINDOWPOSCHANGED) {
+        if (IsWindowVisible(window) && IsDisabledClockTooltip(window))
+            ShowWindow_Original(window, SW_HIDE);
+    }
+    return result;
+}
+
+LRESULT CALLBACK ClockTooltipMessageHook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code >= 0) {
+        const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
+        if (message->message == WM_WINDOWPOSCHANGING) {
+            wchar_t name[64]{};
+            if (GetClassNameW(message->hwnd, name, ARRAYSIZE(name)) &&
+                wcscmp(name, L"Xaml_WindowedPopupClass") == 0)
+                SetWindowSubclass(message->hwnd, ClockTooltipSubclass, 1, 0);
+            auto* position = reinterpret_cast<WINDOWPOS*>(message->lParam);
+            if ((position->flags & SWP_SHOWWINDOW) && IsDisabledClockTooltip(message->hwnd,
+                (position->flags & SWP_NOSIZE) ? 0 : position->cx,
+                (position->flags & SWP_NOSIZE) ? 0 : position->cy)) {
+                position->flags = (position->flags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+            }
+        }
+    }
+    return CallNextHookEx(g_clockTooltipMessageHook, code, wParam, lParam);
+}
+
 BOOL Wh_ModInit() {
     Wh_Log(L">");
 
@@ -6304,6 +6389,12 @@ BOOL Wh_ModInit() {
     }
 
     LoadSettings();
+    WindhawkUtils::SetFunctionHook(SetWindowPos, SetWindowPos_Hook, &SetWindowPos_Original);
+    WindhawkUtils::SetFunctionHook(ShowWindow, ShowWindow_Hook, &ShowWindow_Original);
+    if (const auto taskbar = FindCurrentProcessTaskbarWnd()) {
+        const auto thread = GetWindowThreadProcessId(taskbar, nullptr);
+        g_clockTooltipMessageHook = SetWindowsHookExW(WH_CALLWNDPROC, ClockTooltipMessageHook, nullptr, thread);
+    }
 
     g_winVersion = GetExplorerVersion();
     if (g_winVersion == WinVersion::Unsupported) {
@@ -6430,6 +6521,19 @@ void Wh_ModAfterInit() {
 
 void Wh_ModBeforeUninit() {
     Wh_Log(L">");
+    if (g_clockTooltipMessageHook) {
+        UnhookWindowsHookEx(g_clockTooltipMessageHook);
+        g_clockTooltipMessageHook = nullptr;
+        EnumWindows([](HWND window, LPARAM) -> BOOL {
+            DWORD process{};
+            GetWindowThreadProcessId(window, &process);
+            wchar_t name[64]{};
+            if (process == GetCurrentProcessId() && GetClassNameW(window, name, ARRAYSIZE(name)) &&
+                wcscmp(name, L"Xaml_WindowedPopupClass") == 0)
+                SendMessageW(window, kRemoveClockTooltipSubclass, 0, 0);
+            return TRUE;
+        }, 0);
+    }
 
     if (g_winVersion < WinVersion::Win11) {
         return;

@@ -1,4 +1,4 @@
-#include <winsock2.h>
+﻿#include <winsock2.h>
 #include <windows.h>
 #include <shellapi.h>
 #include <shlwapi.h>
@@ -37,6 +37,7 @@
 #include "taskbar_clock.h"
 #include "clock_extension.h"
 #include "weather.h"
+#include "shutdown_schedule.h"
 #include "../resources/resource.h"
 
 using Microsoft::WRL::ComPtr;
@@ -64,6 +65,8 @@ constexpr UINT kOutsideClickTimer = 2;
 constexpr UINT kCalendarRefreshTimer = 3;
 constexpr UINT kClockTimer = 4;
 constexpr UINT kTaskbarBoundsTimer = 5;
+constexpr UINT kShutdownTimer = 6;
+constexpr int kShutdownInput = 2100;
 constexpr DWORD kEventObjectUncloak = 0x8018;
 constexpr UINT kMenuSettings = 1001;
 constexpr UINT kMenuExit = 1002;
@@ -464,6 +467,40 @@ public:
         DestroyWindow(window_);
         window_ = nullptr;
         fwprintf_s(stderr, L"agenda preview: checks=%s\n", ok ? L"passed" : L"failed");
+        return ok;
+    }
+
+    // Exercise real input and background timers without dispatching a shutdown.
+    bool CheckShutdownTools(HINSTANCE instance)
+    {
+        instance_ = instance;
+        if (!RegisterWindowClass() || !CreateMainWindow()) return false;
+        ToggleTools();
+        bool ok = toolsOpen_ && IsWindow(toolInput_);
+        SetWindowTextW(toolInput_, L"0");
+        StartShutdownSchedule();
+        ok &= !shutdownDue_;
+        SetWindowTextW(toolInput_, L"30");
+        const auto now = std::time(nullptr);
+        StartShutdownSchedule();
+        ok &= shutdownDue_ && *shutdownDue_ >= now + 1800 && *shutdownDue_ <= std::time(nullptr) + 1800;
+        const auto scheduled = shutdownDue_;
+        HidePopup(HideReason::OutsideClick);
+        ok &= !toolsOpen_ && shutdownDue_ == scheduled;
+        TickShutdownSchedule();
+        ok &= shutdownDue_ == scheduled && !shutdownProcess_;
+        ToggleTools();
+        CancelShutdownSchedule();
+        ok &= !shutdownDue_;
+        shutdownAtTime_ = true;
+        SetWindowTextW(toolInput_, L"23:59");
+        StartShutdownSchedule();
+        ok &= shutdownDue_ && *shutdownDue_ > std::time(nullptr);
+        CancelShutdownSchedule();
+        ok &= !shutdownDue_ && !shutdownProcess_;
+        DestroyWindow(window_);
+        window_ = nullptr;
+        fwprintf_s(stderr, L"shutdown tools: %s (no shutdown executed)\n", ok ? L"passed" : L"failed");
         return ok;
     }
 
@@ -1511,7 +1548,7 @@ private:
             WS_EX_TOOLWINDOW,
             kWindowClass,
             kWindowTitle,
-            WS_POPUP,
+            WS_POPUP | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             kLogicalWidth,
@@ -1523,7 +1560,7 @@ private:
         if (!window_)
             return false;
 
-        // 日历面板没有文本输入，避免第三方输入法把整套 TSF/插件注入常驻进程。
+        // 工具面板只输入数字和时刻，保持禁用输入法以避免不必要的插件注入。
         ImmAssociateContextEx(window_, nullptr, IACE_IGNORENOCONTEXT);
         dpi_ = GetDpiForWindow(window_);
         UpdateWindowSize();
@@ -1752,33 +1789,33 @@ private:
         {
             return AddSettingControl(window, L"BUTTON", text, BS_OWNERDRAW, id, x, y, w, h, page);
         };
-        button(L"外观", kSettingPageAppearance, 28, 146, 118, 40);
-        button(L"日历来源", kSettingPageSource, 28, 196, 118, 40);
-        button(L"常规", kSettingPageGeneral, 28, 246, 118, 40);
-        button(L"天气", kSettingPageWeather, 28, 296, 118, 40);
+        button(L"外观设置", kSettingPageAppearance, 12, 82, 132, 42);
+        button(L"日历来源", kSettingPageSource, 12, 132, 132, 42);
+        button(L"常规设置", kSettingPageGeneral, 12, 182, 132, 42);
+        button(L"天气设置", kSettingPageWeather, 12, 232, 132, 42);
 
-        button(L"跟随系统", kSettingTheme, 178, 218, 134, 42, 0);
-        button(L"浅色", kSettingThemeLight, 320, 218, 134, 42, 0);
-        button(L"深色", kSettingThemeDark, 462, 218, 134, 42, 0);
-        button(L"−", kSettingFontMinus, 456, 316, 36, 36, 0);
+        button(L"跟随系统", kSettingTheme, 190, 178, 134, 42, 0);
+        button(L"浅色", kSettingThemeLight, 332, 178, 134, 42, 0);
+        button(L"深色", kSettingThemeDark, 474, 178, 134, 42, 0);
+        button(L"−", kSettingFontMinus, 468, 276, 36, 36, 0);
         AddSettingControl(window, L"EDIT", L"0", ES_CENTER | ES_AUTOHSCROLL,
-                          kSettingFontOffset, 500, 324, 52, 22, 0);
-        button(L"+", kSettingFontPlus, 560, 316, 36, 36, 0);
+                          kSettingFontOffset, 512, 284, 52, 22, 0);
+        button(L"+", kSettingFontPlus, 572, 276, 36, 36, 0);
 
-        button(L"", kSettingDataSource, 178, 208, 254, 38, 1);
-        button(L"", kSettingRefresh, 448, 208, 148, 38, 1);
+        button(L"", kSettingDataSource, 190, 168, 254, 38, 1);
+        button(L"", kSettingRefresh, 460, 168, 148, 38, 1);
         AddSettingControl(window, L"EDIT", L"", ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                          kSettingIcsUrls, 190, 318, 394, 98, 1);
+                          kSettingIcsUrls, 202, 278, 394, 98, 1);
 
-        button(L"开机启动", kSettingAutoStartup, 540, 190, 56, 30, 2);
-        button(L"", kSettingWeekStart, 396, 270, 200, 38, 2);
-        button(L"整月翻滚", kSettingMonthPaging, 540, 352, 56, 30, 2);
-        button(L"任务栏时钟", kSettingTaskbarStatus, 540, 430, 56, 30, 2);
-        button(L"显示格式…", kSettingTaskbarFormatPage, 470, 471, 126, 24, 2);
+        button(L"开机启动", kSettingAutoStartup, 552, 150, 56, 30, 2);
+        button(L"", kSettingWeekStart, 408, 230, 200, 38, 2);
+        button(L"整月翻滚", kSettingMonthPaging, 552, 312, 56, 30, 2);
+        button(L"任务栏时钟", kSettingTaskbarStatus, 552, 390, 56, 30, 2);
+        button(L"显示格式…", kSettingTaskbarFormatPage, 482, 431, 126, 24, 2);
         AddSettingControl(window, L"EDIT", L"", ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                          kSettingTaskbarFormat, 178, 206, 418, 62, 4);
+                          kSettingTaskbarFormat, 190, 166, 418, 62, 4);
         SendDlgItemMessageW(window, kSettingTaskbarFormat, EM_SETLIMITTEXT, 512, 0);
-        button(L"", kSettingWeatherLocation, 178, 218, 418, 38, 3);
+        button(L"", kSettingWeatherLocation, 190, 178, 418, 38, 3);
 
         button(L"恢复默认", kSettingDefaults, 28, 532, 104, 36);
         button(L"取消", kSettingCancel, 438, 532, 88, 36);
@@ -1879,9 +1916,9 @@ private:
     {
         if (settingsWindowDark_)
             return {RGB(24,25,31), RGB(33,35,43), RGB(40,42,52), RGB(237,238,245),
-                    RGB(164,169,186), RGB(114,121,142), RGB(162,155,255), RGB(57,60,75)};
-        return {RGB(246,247,251), RGB(255,255,255), RGB(249,250,253), RGB(33,38,57),
-                RGB(113,121,144), RGB(157,163,180), RGB(103,91,218), RGB(229,232,242)};
+                    RGB(164,169,186), RGB(114,121,142), RGB(64,151,255), RGB(57,60,75)};
+        return {RGB(240,242,245), RGB(255,255,255), RGB(248,249,251), RGB(30,38,50),
+                RGB(133,140,151), RGB(202,206,212), RGB(40,132,255), RGB(231,234,238)};
     }
 
     void EnsureSettingsFonts(HWND)
@@ -1893,9 +1930,9 @@ private:
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH, L"Microsoft YaHei UI");
         };
-        settingsTitleFont_ = makeFont(24, FW_SEMIBOLD);
+        settingsTitleFont_ = makeFont(18, FW_NORMAL);
         settingsBodyFont_ = makeFont(13, FW_NORMAL);
-        settingsLabelFont_ = makeFont(15, FW_SEMIBOLD);
+        settingsLabelFont_ = makeFont(14, FW_NORMAL);
         settingsCaptionFont_ = makeFont(11, FW_NORMAL);
     }
 
@@ -1942,81 +1979,86 @@ private:
         const int savedDc = SaveDC(dc);
         SetViewportOrgEx(dc, -settingsScrollX_, -settingsScrollY_, nullptr);
 
-        SettingsBox(dc, SettingsRect(28, 24, 36, 36), p.accent, p.accent, 12);
-        DrawIconEx(dc, SettingsPx(34), SettingsPx(30), LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON)),
-                   SettingsPx(24), SettingsPx(24), 0, nullptr, DI_NORMAL);
-        SettingsText(dc, L"设置", 78, 20, 180, 32, settingsTitleFont_, p.primary);
-        SettingsText(dc, L"让每一天，都按你的习惯呈现。", 78, 54, 360, 18, settingsCaptionFont_, p.secondary);
-
-        SettingsBox(dc, SettingsRect(162, 136, 490, 364), p.card, p.border, 16);
+        DrawIconEx(dc, SettingsPx(24), SettingsPx(22), LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON)),
+                   SettingsPx(28), SettingsPx(28), 0, nullptr, DI_NORMAL);
+        SettingsText(dc, L"WinCal · 设置", 64, 20, 280, 32, settingsTitleFont_, p.primary);
+        SettingsBox(dc, SettingsRect(156, 76, 508, 436), p.card, p.card, 16);
+        const auto group = [&](int y, int height)
+        {
+            SettingsBox(dc, SettingsRect(174, y, 472, height), p.input, p.border, 8);
+        };
+        if (settingsPage_ == 0) { group(140, 104); group(252, 106); group(366, 106); }
+        else if (settingsPage_ == 1) { group(140, 74); group(218, 248); }
+        else if (settingsPage_ == 2) { group(140, 70); group(218, 156); group(382, 90); }
+        else if (settingsPage_ == 3) { group(140, 90); group(238, 206); }
+        else { group(140, 96); group(240, 100); group(344, 132); }
         if (settingsPage_ == 0)
         {
-            SettingsText(dc, L"外观与字号", 178, 154, 280, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"主题模式", 178, 190, 220, 20, settingsBodyFont_, p.secondary);
-            SettingsText(dc, L"文字大小", 178, 306, 220, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"仅调整日历中的文字", 178, 334, 230, 20, settingsCaptionFont_, p.secondary);
-            SettingsBox(dc, SettingsRect(497, 316, 58, 36), p.input,
+            SettingsText(dc, L"外观与字号", 190, 114, 280, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"主题模式", 190, 150, 220, 20, settingsBodyFont_, p.secondary);
+            SettingsText(dc, L"文字大小", 190, 266, 220, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"仅调整日历中的文字", 190, 294, 230, 20, settingsCaptionFont_, p.secondary);
+            SettingsBox(dc, SettingsRect(509, 276, 58, 36), p.input,
                         GetFocus() == GetDlgItem(window, kSettingFontOffset) ? p.accent : p.border, 8);
-            SettingsText(dc, L"可调范围 −2 至 +10", 434, 362, 162, 20, settingsCaptionFont_, p.secondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            SettingsBox(dc, SettingsRect(178, 406, 418, 66), p.input, p.input, 12);
-            SettingsText(dc, L"在日历窗口中实时预览", 194, 416, 360, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"保存以保留修改；取消会恢复原来的效果。", 194, 440, 376, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"可调范围 −2 至 +10", 446, 322, 162, 20, settingsCaptionFont_, p.secondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            SettingsText(dc, L"在日历窗口中实时预览", 206, 376, 360, 22, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"保存以保留修改；取消会恢复原来的效果。", 206, 400, 376, 20, settingsCaptionFont_, p.secondary);
         }
         else if (settingsPage_ == 1)
         {
             const bool useIcs = SettingSelection(window, kSettingDataSource) != 0;
-            SettingsText(dc, L"日历与订阅", 178, 154, 280, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"日历来源", 178, 182, 240, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"自动刷新", 448, 182, 148, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"ICS 订阅链接", 178, 264, 300, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"每行一条公开的 .ics 链接", 178, 288, 400, 20, settingsCaptionFont_, p.secondary);
-            SettingsBox(dc, SettingsRect(178, 310, 418, 118), p.input,
+            SettingsText(dc, L"日历与订阅", 190, 114, 280, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"日历来源", 190, 142, 240, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"自动刷新", 460, 142, 148, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"ICS 订阅链接", 190, 224, 300, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"每行一条公开的 .ics 链接", 190, 248, 400, 20, settingsCaptionFont_, p.secondary);
+            SettingsBox(dc, SettingsRect(190, 270, 418, 118), p.input,
                         GetFocus() == GetDlgItem(window, kSettingIcsUrls) ? p.accent : p.border, 10);
             SettingsText(dc, useIcs ? L"保存后后台刷新，已有缓存会立即用于展示。" : L"当前使用系统日历，切换来源后可编辑订阅。",
-                         178, 444, 418, 26, settingsCaptionFont_, p.secondary);
+                         190, 404, 418, 26, settingsCaptionFont_, p.secondary);
             SettingsText(dc, L"中国节假日与调休：提莫接口，每日自动更新。",
-                         178, 476, 418, 22, settingsCaptionFont_, p.secondary);
+                         190, 436, 418, 22, settingsCaptionFont_, p.secondary);
         }
         else if (settingsPage_ == 2)
         {
-            SettingsText(dc, L"启动与日历布局", 178, 154, 320, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"开机启动", 178, 186, 320, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"登录 Windows 后自动运行 WinCal", 178, 212, 338, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"每周开始", 178, 268, 200, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"选择日历每一行的第一天", 178, 294, 210, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"整月翻滚", 178, 352, 320, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"关闭后翻月时逐周平滑滚动", 178, 378, 338, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"任务栏双行时钟", 178, 430, 320, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"保存后生效，可自定义显示格式。", 178, 460, 280, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"启动与日历布局", 190, 114, 320, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"开机启动", 190, 146, 320, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"登录 Windows 后自动运行 WinCal", 190, 172, 338, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"每周开始", 190, 228, 200, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"选择日历每一行的第一天", 190, 254, 210, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"整月翻滚", 190, 312, 320, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"关闭后翻月时逐周平滑滚动", 190, 338, 338, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"任务栏双行时钟", 190, 390, 320, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"保存后生效，可自定义显示格式。", 190, 420, 280, 22, settingsCaptionFont_, p.secondary);
         }
         else if (settingsPage_ == 3)
         {
-            SettingsText(dc, L"天气与位置", 178, 154, 320, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"定位方式", 178, 190, 320, 20, settingsBodyFont_, p.secondary);
-            SettingsText(dc, L"自动定位优先使用 Windows 位置服务。", 178, 282, 418, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"无法获取时使用网络定位，仍不可用时默认北京。", 178, 310, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"天气与位置", 190, 114, 320, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"定位方式", 190, 150, 320, 20, settingsBodyFont_, p.secondary);
+            SettingsText(dc, L"自动定位优先使用 Windows 位置服务。", 190, 242, 418, 22, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"无法获取时使用网络定位，仍不可用时默认北京。", 190, 270, 418, 22, settingsCaptionFont_, p.secondary);
             const auto weather = weatherData_.Snapshot();
             const std::wstring position = weather.available ? L"当前：" + weather.location.city + L" · " + weather.location.source : L"当前：正在获取位置与天气";
-            SettingsText(dc, position.c_str(), 178, 338, 418, 22, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"点击日历顶部天气，查看未来 7 天温度曲线。", 178, 366, 418, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"天气每 15 分钟更新，也可在详情中手动刷新。", 178, 398, 418, 22, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"天气数据：Open-Meteo  ·  网络定位：ipwho.is", 178, 454, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, position.c_str(), 190, 298, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"点击日历顶部天气，查看未来 7 天温度曲线。", 190, 326, 418, 22, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"天气每 15 分钟更新，也可在详情中手动刷新。", 190, 358, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"天气数据：Open-Meteo  ·  网络定位：ipwho.is", 190, 414, 418, 22, settingsCaptionFont_, p.secondary);
         }
         else
         {
-            SettingsText(dc, L"任务栏显示格式", 178, 154, 320, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"使用 \\n 分隔上下两行，或直接按回车换行。", 178, 183, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"预览", 178, 285, 418, 22, settingsBodyFont_, p.secondary);
+            SettingsText(dc, L"任务栏显示格式", 190, 114, 320, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"使用 \\n 分隔上下两行，或直接按回车换行。", 190, 143, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"预览", 190, 245, 418, 22, settingsBodyFont_, p.secondary);
             SYSTEMTIME now{}; GetLocalTime(&now);
             const auto fields = CurrentTaskbarFields();
             const auto preview = wincal::FormatTaskbar(ReadControlText(GetDlgItem(window, kSettingTaskbarFormat)), now,
                 [&](size_t i) { return fields[i]; });
-            SettingsText(dc, preview.c_str(), 178, 316, 418, 60, settingsBodyFont_, p.primary, DT_WORDBREAK);
-            SettingsText(dc, L"yyyy 年 / mm 月 / dd 日 / HH:ff:ss 时分秒", 178, 390, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"MD 农历 / ddd 周几 / shichen 时辰 / pos 城市", 178, 412, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"rtm 实时温度 / rhu 湿度 / rwd 风力风向", 178, 434, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"we1～we7 天气 / tl1～tl7 最低温 / th1～th7 最高温", 178, 456, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"序号 1 表示今天，2 表示明天；缺少数据时显示 —。", 178, 478, 418, 18, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, preview.c_str(), 190, 276, 418, 60, settingsBodyFont_, p.primary, DT_WORDBREAK);
+            SettingsText(dc, L"yyyy 年 / mm 月 / dd 日 / HH:ff:ss 时分秒", 190, 350, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"MD 农历 / ddd 周几 / shichen 时辰 / pos 城市", 190, 372, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"rtm 实时温度 / rhu 湿度 / rwd 风力风向", 190, 394, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"we1～we7 天气 / tl1～tl7 最低温 / th1～th7 最高温", 190, 416, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"序号 1 表示今天，2 表示明天；缺少数据时显示 —。", 190, 438, 418, 18, settingsCaptionFont_, p.secondary);
         }
 
         RECT line = SettingsRect(28, 516, 624, 1);
@@ -2037,12 +2079,14 @@ private:
         const bool theme = id == kSettingTheme || id == kSettingThemeLight || id == kSettingThemeDark;
         const bool toggle = id == kSettingAutoStartup || id == kSettingMonthPaging || id == kSettingTaskbarStatus;
         const bool dropdown = !theme && !SettingOptions(id).empty();
-        const bool active = (tab && settingsPage_ == id - kSettingPageAppearance) ||
+        const bool active = (tab && (settingsPage_ == id - kSettingPageAppearance ||
+            (settingsPage_ == 4 && id == kSettingPageGeneral))) ||
             (theme && SettingSelection(settingsWindow_, kSettingTheme) == (id == kSettingTheme ? 0 : id == kSettingThemeLight ? 1 : 2));
         const bool primary = id == kSettingSave;
-        const auto tint = settingsWindowDark_ ? RGB(49,46,71) : RGB(239,237,252);
-        const auto fill = primary ? p.accent : active || hot || pressed ? tint : tab ? p.background : p.input;
-        const auto background = CreateSolidBrush(tab || id == kSettingDefaults || id == kSettingCancel || primary ? p.background : p.card);
+        const auto tint = tab ? (settingsWindowDark_ ? RGB(54,56,62) : RGB(226,228,231)) :
+            (settingsWindowDark_ ? RGB(40,62,86) : RGB(235,244,255));
+        const auto fill = primary ? p.accent : active || hot || pressed ? tint : tab ? p.background : p.card;
+        const auto background = CreateSolidBrush(tab || id == kSettingDefaults || id == kSettingCancel || primary ? p.background : p.input);
         FillRect(item.hDC, &item.rcItem, background);
         DeleteObject(background);
         if (toggle)
@@ -2056,7 +2100,7 @@ private:
         }
         else
         {
-            SettingsBox(item.hDC, item.rcItem, fill, primary ? p.accent : active ? p.accent : tab ? fill : p.border, 10);
+            SettingsBox(item.hDC, item.rcItem, fill, primary ? p.accent : tab ? fill : active ? p.accent : p.border, 10);
             wchar_t text[96]{};
             // The first segment keeps its label even when a different theme is selected.
             if (id == kSettingTheme) wcscpy_s(text, L"跟随系统");
@@ -2066,7 +2110,7 @@ private:
             const auto oldFont = SelectObject(item.hDC, settingsBodyFont_);
             SetBkMode(item.hDC, TRANSPARENT);
             SetTextColor(item.hDC, !enabled ? p.muted : primary ?
-                         (settingsWindowDark_ ? RGB(24,25,31) : RGB(255,255,255)) : active ? p.accent : p.primary);
+                         (settingsWindowDark_ ? RGB(24,25,31) : RGB(255,255,255)) : active && !tab ? p.accent : p.primary);
             ::DrawTextW(item.hDC, text, -1, &rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | (dropdown ? DT_LEFT : DT_CENTER));
             SelectObject(item.hDC, oldFont);
             if (dropdown)
@@ -2140,6 +2184,8 @@ private:
 
     void HidePopup(HideReason reason)
     {
+        toolsOpen_ = false;
+        if (IsWindow(toolInput_)) ShowWindow(toolInput_, SW_HIDE);
         KillTimer(window_, kClockTimer);
         weatherPanelOpen_ = false;
         if (IsWindow(weatherWindow_)) ShowWindow(weatherWindow_, SW_HIDE);
@@ -2307,7 +2353,20 @@ private:
         HWND secondary{};
         while ((secondary = FindWindowExW(nullptr, secondary, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr)
             append(secondary);
-
+        // Publish exact clock rectangles for the injected tooltip filter. This
+        // avoids running UI Automation on Explorer's window-show path.
+        SetPropW(window_, L"WinCal.ClockRectCount", nullptr);
+        for (size_t i = 0; i < taskbarClockBounds_.size(); ++i)
+        {
+            const auto& rect = taskbarClockBounds_[i].second;
+            const LONG coordinates[] = {rect.left, rect.top, rect.right, rect.bottom};
+            for (size_t part = 0; part < 4; ++part)
+            {
+                const auto name = L"WinCal.ClockRect." + std::to_wstring(i) + L"." + std::to_wstring(part);
+                SetPropW(window_, name.c_str(), reinterpret_cast<HANDLE>(static_cast<INT_PTR>(coordinates[part])));
+            }
+        }
+        SetPropW(window_, L"WinCal.ClockRectCount", reinterpret_cast<HANDLE>(taskbarClockBounds_.size()));
     }
 
     bool IsCachedTaskbarClockPoint(POINT point) const
@@ -2555,7 +2614,7 @@ private:
                 y >= secondRowTop && y < secondRowTop + rowHeight ? kMenuExit : 0;
             ShowWindow(window, SW_HIDE);
             if (item == kMenuSettings) ShowSettingsWindow();
-            else if (item == kMenuExit) DestroyWindow(window_);
+            else if (item == kMenuExit) RequestExit();
             return 0;
         }
         case WM_KEYDOWN:
@@ -2564,7 +2623,7 @@ private:
             {
                 ShowWindow(window, SW_HIDE);
                 if (contextMenuHover_ == 0) ShowSettingsWindow();
-                else if (contextMenuHover_ == 1) DestroyWindow(window_);
+                else if (contextMenuHover_ == 1) RequestExit();
                 return 0;
             }
             return 0;
@@ -3088,6 +3147,7 @@ private:
 
     int HitTestNavigation(int x, int y) const
     {
+        if (HitTestTools(x, y)) return -1;
         const float px = static_cast<float>(x) / Scale(1);
         const float py = static_cast<float>(y) / Scale(1) - kClockHeight;
         if (px >= 286 && px < 416 && py >= -kClockHeight + 8 && py < -8) return -6;
@@ -3371,7 +3431,7 @@ private:
         const bool outsideContinuousView = !settings_.monthPaging && continuousInitialized_ &&
             (selectedDay < firstVisibleDay || selectedDay >= firstVisibleDay +
                 (continuousPosition_ == std::floor(continuousPosition_) ? 42 : 49));
-        if (weatherPanelOpen_ || pickerMode_ != DatePickerMode::Closed || outsideContinuousView || !IsWindowVisible(window_) || agendaEvents_.empty() ||
+        if (toolsOpen_ || weatherPanelOpen_ || pickerMode_ != DatePickerMode::Closed || outsideContinuousView || !IsWindowVisible(window_) || agendaEvents_.empty() ||
             (settings_.monthPaging && (selected_.year != displayYear_ || selected_.month != displayMonth_)))
         {
             if (IsWindow(agendaWindow_)) ShowWindow(agendaWindow_, SW_HIDE);
@@ -3692,6 +3752,7 @@ private:
     {
         // Do not let key auto-repeat dismiss the parent after closing details.
         if (keyState & (static_cast<LPARAM>(1) << 30)) return;
+        if (toolsOpen_) { ToggleTools(); return; }
         if (weatherPanelOpen_) { ToggleWeatherForecast(); return; }
         if (pickerMode_ != DatePickerMode::Closed)
         {
@@ -4506,6 +4567,176 @@ private:
             bodyFormat_.Get(), footer, theme.muted);
     }
 
+    void LayoutToolInput()
+    {
+        if (!IsWindow(toolInput_)) return;
+        SetWindowPos(toolInput_, nullptr, static_cast<int>(Scale(48)), static_cast<int>(Scale(354)),
+            static_cast<int>(Scale(330)), static_cast<int>(Scale(28)), SWP_NOZORDER | SWP_NOACTIVATE);
+        if (toolInputFont_) DeleteObject(toolInputFont_);
+        toolInputFont_ = CreateFontW(-static_cast<int>(Scale(17)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
+        SendMessageW(toolInput_, WM_SETFONT, reinterpret_cast<WPARAM>(toolInputFont_), TRUE);
+    }
+
+    void ToggleTools()
+    {
+        toolsOpen_ = !toolsOpen_;
+        if (toolsOpen_)
+        {
+            pickerMode_ = DatePickerMode::Closed;
+            CloseWeatherForecast();
+            if (!IsWindow(toolInput_))
+            {
+                toolInput_ = CreateWindowExW(0, L"EDIT", L"30", WS_CHILD | ES_AUTOHSCROLL | WS_TABSTOP,
+                    0, 0, 0, 0, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShutdownInput)), instance_, nullptr);
+                SendMessageW(toolInput_, EM_SETLIMITTEXT, 5, 0);
+                SetWindowSubclass(toolInput_, ToolInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
+            }
+            LayoutToolInput();
+        }
+        ShowWindow(toolInput_, toolsOpen_ ? SW_SHOW : SW_HIDE);
+        if (toolsOpen_) SetFocus(toolInput_);
+        else SetFocus(window_);
+        PresentAgenda();
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    static LRESULT CALLBACK ToolInputProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
+                                          UINT_PTR, DWORD_PTR data)
+    {
+        auto* app = reinterpret_cast<App*>(data);
+        if (message == WM_KEYDOWN && wParam == VK_ESCAPE) { app->ToggleTools(); return 0; }
+        if (message == WM_KEYDOWN && wParam == VK_RETURN) { app->StartShutdownSchedule(); return 0; }
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
+    void StartShutdownSchedule()
+    {
+        if (shutdownDue_) return;
+        if (shutdownProcess_) return;
+        const auto due = wincal::ShutdownDeadline(ReadControlText(toolInput_), shutdownAtTime_, std::time(nullptr));
+        if (!due)
+        {
+            toolStatus_ = shutdownAtTime_ ? L"请输入有效时刻，例如 23:30。" : L"请输入 1～10080 分钟。";
+        }
+        else if (!SetTimer(window_, kShutdownTimer, 1000, nullptr))
+            toolStatus_ = L"无法创建计时器，请重试。";
+        else
+        {
+            shutdownDue_ = due;
+            toolStatus_.clear();
+            SendMessageW(toolInput_, EM_SETREADONLY, TRUE, 0);
+        }
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    void CancelShutdownSchedule()
+    {
+        shutdownDue_.reset();
+        KillTimer(window_, kShutdownTimer);
+        SendMessageW(toolInput_, EM_SETREADONLY, FALSE, 0);
+        toolStatus_ = L"定时关机已取消。";
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    void TickShutdownSchedule()
+    {
+        if (!shutdownDue_) return;
+        if (std::time(nullptr) >= *shutdownDue_)
+        {
+            shutdownDue_.reset();
+            SendMessageW(toolInput_, EM_SETREADONLY, FALSE, 0);
+            wchar_t systemDir[MAX_PATH]{};
+            GetSystemDirectoryW(systemDir, ARRAYSIZE(systemDir));
+            const auto executable = std::wstring{systemDir} + L"\\shutdown.exe";
+            // No /f: allow Windows and applications to handle unsaved work normally.
+            wchar_t command[] = L"shutdown.exe /s /t 0";
+            STARTUPINFOW startup{sizeof(startup)};
+            PROCESS_INFORMATION process{};
+            if (CreateProcessW(executable.c_str(), command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                               nullptr, systemDir, &startup, &process))
+            {
+                shutdownProcess_ = process.hProcess;
+                CloseHandle(process.hThread);
+                toolStatus_ = L"已向 Windows 发送关机请求。";
+            }
+            else
+            {
+                KillTimer(window_, kShutdownTimer);
+                toolStatus_ = L"关机请求失败，请检查系统权限。";
+            }
+        }
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+
+    void RequestExit()
+    {
+        if (shutdownDue_ && MessageBoxW(window_, L"定时关机正在计时。退出将取消任务，是否退出？",
+            L"WinCal", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+        DestroyWindow(window_);
+    }
+
+    // All rectangles here use the popup's absolute logical coordinates.
+    int HitTestTools(int x, int y) const
+    {
+        const float px = x / Scale(1), py = y / Scale(1);
+        if (py >= 510 && py < 546 && px >= 20 && px < 410) return px < 215 ? 1 : 2;
+        if (!toolsOpen_ || px < 20 || px >= 410 || py < 250 || py >= 504) return 0;
+        if (px >= 370 && py < 290) return 3;
+        if (py >= 300 && py < 334) return px < 215 ? 4 : 5;
+        if (py >= 446 && py < 480) return shutdownDue_ ? 7 : 6;
+        return 8; // Consume panel clicks rather than selecting a date underneath.
+    }
+
+    void DrawTools(const Theme& theme)
+    {
+        renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
+        const auto button = [&](const wchar_t* text, float left, float top, float right, float bottom, bool active)
+        {
+            const auto rect = D2D1::RectF(Scale(left), Scale(top), Scale(right), Scale(bottom));
+            const auto fill = Brush(active ? theme.accent : theme.hover);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(7), Scale(7)), fill.Get());
+            DrawText(text, bodyFormat_.Get(), rect, active ? D2D1::ColorF(0xFFFFFF) : theme.primary);
+        };
+        const auto separator = Brush(theme.separator);
+        renderTarget_->DrawLine({Scale(20), Scale(508)}, {Scale(410), Scale(508)}, separator.Get(), Scale(1));
+        button(L"日历", 22, 514, 208, 544, !toolsOpen_);
+        button(shutdownDue_ ? L"工具 · 关机计时中" : L"工具 · 定时关机", 222, 514, 408, 544, toolsOpen_);
+        if (!toolsOpen_) return;
+        const auto panel = D2D1::RectF(Scale(20), Scale(250), Scale(410), Scale(504));
+        const auto fill = Brush(theme.background);
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(panel, Scale(10), Scale(10)), fill.Get());
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(panel, Scale(10), Scale(10)), separator.Get(), Scale(1));
+        DrawText(L"定时关机", dayFormat_.Get(), {Scale(36), Scale(260), Scale(165), Scale(290)}, theme.primary);
+        DrawText(L"×", bodyFormat_.Get(), {Scale(370), Scale(258), Scale(402), Scale(290)}, theme.secondary);
+        button(L"倒计时", 36, 300, 210, 332, !shutdownAtTime_);
+        button(L"指定时刻", 220, 300, 394, 332, shutdownAtTime_);
+        const auto input = D2D1::RectF(Scale(36), Scale(344), Scale(394), Scale(388));
+        const auto inputBrush = Brush(theme.hover);
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(input, Scale(6), Scale(6)), inputBrush.Get());
+        if (!IsWindow(toolInput_))
+            DrawText(shutdownAtTime_ ? L"23:30" : L"30", bodyFormat_.Get(), input, theme.primary);
+        std::wstring status = toolStatus_.empty() ?
+            (shutdownAtTime_ ? L"24 小时制 HH:mm；已过的时刻安排在明天。" : L"输入分钟数，支持 1 分钟至 7 天。") : toolStatus_;
+        if (shutdownDue_)
+        {
+            std::tm local{};
+            const auto due = *shutdownDue_;
+            localtime_s(&local, &due);
+            const auto remaining = std::max<std::time_t>(0, due - std::time(nullptr));
+            wchar_t text[128]{};
+            swprintf_s(text, L"%02d月%02d日 %02d:%02d 关机 · 剩余 %lld:%02lld:%02lld",
+                local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min,
+                static_cast<long long>(remaining / 3600), static_cast<long long>(remaining / 60 % 60),
+                static_cast<long long>(remaining % 60));
+            status = text;
+        }
+        DrawText(status.c_str(), lunarFormat_.Get(), {Scale(30), Scale(398), Scale(400), Scale(436)}, theme.secondary);
+        button(shutdownDue_ ? L"取消定时关机" : L"开始计时", 36, 446, 394, 478, !shutdownDue_);
+        DrawText(L"隐藏日历后继续计时，退出 WinCal 将取消任务。", lunarFormat_.Get(),
+            {Scale(30), Scale(480), Scale(400), Scale(502)}, theme.muted);
+    }
+
     void Paint()
     {
         if (!EnsureDeviceResources() || !renderTarget_)
@@ -4592,6 +4823,7 @@ private:
             DrawMonthGrid(theme, today, displayYear_, displayMonth_, 0.45f + transition_ * 0.55f);
         }
 
+        DrawTools(theme);
         }
         const HRESULT result = renderTarget_->EndDraw();
 #ifdef WINCAL_SETTINGS_PREVIEW
@@ -4630,6 +4862,21 @@ private:
 
         switch (message)
         {
+        case WM_CLOSE:
+            RequestExit();
+            return 0;
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORSTATIC:
+        {
+            if (reinterpret_cast<HWND>(lParam) != toolInput_) break;
+            const auto theme = GetTheme(dark_);
+            const auto color = [](D2D1_COLOR_F c) { return RGB(static_cast<int>(c.r * 255),
+                static_cast<int>(c.g * 255), static_cast<int>(c.b * 255)); };
+            SetTextColor(reinterpret_cast<HDC>(wParam), color(theme.primary));
+            SetBkColor(reinterpret_cast<HDC>(wParam), color(theme.hover));
+            SetDCBrushColor(reinterpret_cast<HDC>(wParam), color(theme.hover));
+            return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
+        }
         case WM_PAINT:
         {
             PAINTSTRUCT paint{};
@@ -4645,6 +4892,7 @@ private:
             PositionWeatherForecast();
             return 0;
         case WM_SIZE:
+            LayoutToolInput();
             if (renderTarget_)
                 static_cast<ID2D1HwndRenderTarget*>(renderTarget_.Get())
                     ->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
@@ -4652,6 +4900,7 @@ private:
         case WM_DPICHANGED:
         {
             dpi_ = HIWORD(wParam);
+            LayoutToolInput();
             const auto* suggested = reinterpret_cast<RECT*>(lParam);
             SetWindowPos(
                 window_, HWND_TOPMOST, suggested->left, suggested->top,
@@ -4709,6 +4958,21 @@ private:
             return 0;
         case WM_LBUTTONUP:
         {
+            const int tool = HitTestTools(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            if (tool)
+            {
+                if ((tool == 1 && toolsOpen_) || tool == 2 || tool == 3) ToggleTools();
+                else if ((tool == 4 || tool == 5) && !shutdownDue_)
+                {
+                    shutdownAtTime_ = tool == 5;
+                    SetWindowTextW(toolInput_, shutdownAtTime_ ? L"23:30" : L"30");
+                    toolStatus_.clear();
+                }
+                else if (tool == 6) StartShutdownSchedule();
+                else if (tool == 7) CancelShutdownSchedule();
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
             const int navigation = HitTestNavigation(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             if (navigation == -6) { ToggleWeatherForecast(); return 0; }
             if (navigation == -2) { OpenDatePicker(); return 0; }
@@ -4756,6 +5020,7 @@ private:
         }
         case WM_MOUSEWHEEL:
         {
+            if (toolsOpen_) return 0;
             if (pickerMode_ != DatePickerMode::Closed)
             {
                 ChangePickerPage(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
@@ -4768,6 +5033,11 @@ private:
             return 0;
         }
         case WM_KEYDOWN:
+            if (toolsOpen_)
+            {
+                if (wParam == VK_ESCAPE) ToggleTools();
+                return 0;
+            }
             if (pickerMode_ != DatePickerMode::Closed)
             {
                 pickerKeyboardFocus_ = true;
@@ -4795,7 +5065,7 @@ private:
                 POINT point{};
                 GetCursorPos(&point);
                 ScreenToClient(window_, &point);
-                if (HitTestNavigation(point.x, point.y) != -1)
+                if (HitTestNavigation(point.x, point.y) != -1 || HitTestTools(point.x, point.y))
                 {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
@@ -4803,6 +5073,23 @@ private:
             }
             return DefWindowProcW(window_, message, wParam, lParam);
         case WM_TIMER:
+            if (wParam == kShutdownTimer)
+            {
+                if (shutdownProcess_)
+                {
+                    DWORD code{};
+                    if (GetExitCodeProcess(shutdownProcess_, &code) && code != STILL_ACTIVE)
+                    {
+                        CloseHandle(shutdownProcess_);
+                        shutdownProcess_ = nullptr;
+                        KillTimer(window_, kShutdownTimer);
+                        if (code != 0) toolStatus_ = L"Windows 拒绝了关机请求，请检查权限。";
+                        InvalidateRect(window_, nullptr, FALSE);
+                    }
+                }
+                else TickShutdownSchedule();
+                return 0;
+            }
             if (wParam == kTaskbarBoundsTimer)
             {
                 KillTimer(window_, kTaskbarBoundsTimer);
@@ -4909,6 +5196,9 @@ private:
             ShowSettingsWindow();
             return 0;
         case WM_DESTROY:
+            KillTimer(window_, kShutdownTimer);
+            if (shutdownProcess_) CloseHandle(shutdownProcess_);
+            if (toolInputFont_) DeleteObject(toolInputFont_);
             taskbarStatus_.Stop();
             if (IsWindow(weatherWindow_)) DestroyWindow(weatherWindow_);
             if (IsWindow(agendaWindow_)) DestroyWindow(agendaWindow_);
@@ -4941,6 +5231,13 @@ private:
     HWND contextMenuWindow_{};
     int contextMenuHover_{-1};
     HWND settingsWindow_{};
+    bool toolsOpen_{};
+    bool shutdownAtTime_{};
+    HWND toolInput_{};
+    HFONT toolInputFont_{};
+    std::optional<std::time_t> shutdownDue_;
+    HANDLE shutdownProcess_{};
+    std::wstring toolStatus_;
 #ifdef WINCAL_SETTINGS_PREVIEW
     bool agendaPreview_{};
 #endif

@@ -2,6 +2,7 @@
 #include "../src/lunar_calendar.h"
 #include "../src/taskbar_clock.h"
 #include "../src/startup_setting.h"
+#include "../src/shutdown_schedule.h"
 #include <winrt/base.h>
 #include <iostream>
 
@@ -14,6 +15,28 @@ int main()
         if (!condition) { std::cerr << "FAIL: " << name << '\n'; ++failures; }
     };
     wincal::LunarCalendar lunar;
+    std::tm shutdownNow{};
+    shutdownNow.tm_year = 126;
+    shutdownNow.tm_mon = 10;
+    shutdownNow.tm_mday = 3;
+    shutdownNow.tm_hour = 23;
+    shutdownNow.tm_min = 45;
+    shutdownNow.tm_isdst = -1;
+    const auto scheduleNow = std::mktime(&shutdownNow);
+    check(wincal::ShutdownDeadline(L" 30 ", false, scheduleNow) == scheduleNow + 1800,
+          "shutdown countdown accepts custom minutes across midnight");
+    check(wincal::ShutdownDeadline(L"10080", false, scheduleNow) == scheduleNow + 604800,
+          "shutdown countdown supports seven days");
+    for (const auto input : {L"", L"0", L"-1", L"1.5", L"30junk", L"10081", L"999999999"})
+        check(!wincal::ShutdownDeadline(input, false, scheduleNow), "invalid shutdown minutes rejected");
+    for (const auto input : {L"24:00", L"23:60", L"8:30", L"12:30junk", L"-1:00"})
+        check(!wincal::ShutdownDeadline(input, true, scheduleNow), "invalid shutdown time rejected");
+    check(wincal::ShutdownDeadline(L"23:50", true, scheduleNow) == scheduleNow + 300,
+          "future shutdown time stays today");
+    check(wincal::ShutdownDeadline(L"00:15", true, scheduleNow) == scheduleNow + 1800,
+          "past shutdown time rolls over to tomorrow");
+    check(wincal::ShutdownDeadline(L"23:45", true, scheduleNow) == scheduleNow + 86400,
+          "equal shutdown time schedules tomorrow instead of immediately");
     SYSTEMTIME sample{2026, 11, 2, 3, 9, 5, 7, 0};
     wincal::TaskbarFields fields;
     fields[2] = L"九月廿五"; fields[4] = L"8℃"; fields[5] = L"湿度28%";
