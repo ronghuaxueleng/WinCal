@@ -29,9 +29,9 @@ int main()
     }
 
     wincal::AppSettings defaults;
-    if (!defaults.monthPaging)
+    if (!defaults.monthPaging || defaults.weekStartDay != L"Monday")
     {
-        std::wcerr << L"MonthPaging default should be true.\n";
+        std::wcerr << L"Default settings should start weeks on Monday and keep month paging enabled.\n";
         return 4;
     }
 

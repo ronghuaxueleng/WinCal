@@ -106,6 +106,11 @@ add_custom_target(WinCalTaskbarHost ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/hos
 add_dependencies(WinCalNative WinCalTaskbarClock WinCalTaskbarHost)
 install(TARGETS WinCalTaskbarClock RUNTIME DESTINATION .)
 install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/host/WinCalTaskbarHost.exe" DESTINATION .)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/windhawk-engine/TaskbarExtension/"
+    DESTINATION TaskbarExtension
+    PATTERN "*.lib" EXCLUDE)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/windhawk-engine/LICENSE"
+    DESTINATION TaskbarExtension)
 
 # On-demand visual check; excluded from normal builds and installation.
 add_executable(WinCalSettingsPreview EXCLUDE_FROM_ALL

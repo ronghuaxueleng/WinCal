@@ -1,6 +1,6 @@
 # WinCal Native（主工程）
 
-WinCal 的主工程是原生 Win32/C++ 版本。旧版 WPF 工程已冻结并归档到 `../archive/wpf/`，只用于历史对照和兼容性参考。
+WinCal 的主工程是原生 Win32/C++ 版本。
 
 运行时保持在一个原生进程内：Win32 窗口、托盘和任务栏拦截负责交互，Direct2D/DirectWrite 负责绘制，C++/WinRT 读取系统日历，WinHTTP 下载 ICS 并写入本地缓存。设置窗口按需创建，关闭后释放其字体、画刷和控件资源。
 
@@ -10,7 +10,7 @@ WinCal 的主工程是原生 Win32/C++ 版本。旧版 WPF 工程已冻结并归
 - Win32 托盘图标与左键开关、右键菜单
 - 点击 Windows 任务栏日期/时钟区域时拦截系统日历并显示 WinCal
 - 再次点击托盘关闭面板，点击面板外部自动收起
-- 无边框 DWM 圆角日历弹窗，不使用 WPF 分层透明窗口
+- 无边框 DWM 圆角日历弹窗
 - Direct2D/DirectWrite 日历绘制
 - Direct2D 软件渲染目标：本机实测弹窗私有内存约 16–19 MB；硬件优先目标约 53 MB，因此不作为默认路径
 - 单击日期、悬停反馈和轻量淡入动画
@@ -162,13 +162,7 @@ cmake --build native/build --config Release --target WinCalSettingsPreview
 
 扩展在系统时钟原位显示双行内容并为托盘让位。天气和农历来自 WinCal 的本机只读接口 `127.0.0.1:17864/wincal`，时间由扩展每秒更新。关闭任务栏时钟开关或退出 WinCal 后卸载扩展，恢复系统时钟。
 
-准备扩展时，从签名有效的 Windhawk 1.7.3 官方安装包中提取引擎，不执行安装包；需要本机 7-Zip：
-
-```powershell
-./native/tools/install-taskbar-extension.ps1 -InstallerPath ./native/build/windhawk_setup.exe -ModLibraryPath ./native/build/Release/WinCalTaskbarClock.dll -SevenZipPath 'C:/Program Files/7-Zip/7z.exe'
-```
-
-引擎与配置存放在 `%LOCALAPPDATA%\WinCal\TaskbarExtension`。
+Windhawk 1.7.3 x86/x64 引擎和时钟模块配置已随项目固定打包，`build.ps1` 会将它们安装到 `WinCal.exe` 旁的 `TaskbarExtension` 目录；无需单独下载或安装 Windhawk。运行目录需要允许当前用户写入，以便更新时钟配置。
 
 “设置 → 常规 → 显示格式”支持两行模板、编辑预览与保存。采用软媒时间的月份/分钟约定，而非 .NET 格式：
 

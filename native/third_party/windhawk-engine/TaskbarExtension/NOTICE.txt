@@ -1,0 +1,11 @@
+Windhawk Engine 1.7.3
+Copyright Michael Maltsev. Licensed under GNU GPL v3.0.
+Source: https://github.com/ramensoftware/windhawk/tree/v1.7.3
+Release: https://github.com/ramensoftware/windhawk/releases/tag/v1.7.3
+
+The engine files were extracted from the official signed windhawk_setup.exe.
+SHA-256: 5116cc1703384aac88b8d7a3b57f172aea5da32b6df7355fb2f8247d23813c8f
+
+WinCal's taskbar clock module is built from the GPL-3.0 source in
+native/third_party/windhawk-clock. The module is loaded by the x86 host and provides taskbar
+weather and lunar fields through WinCal's loopback-only endpoint.

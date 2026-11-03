@@ -24,18 +24,19 @@ public:
     void Start(HINSTANCE instance, std::function<Lines()> text, std::wstring_view format)
     {
         if (Running()) return;
-        config_ = SettingsStore::CacheDirectory().parent_path() / L"TaskbarExtension" / L"AppData" /
-            L"Engine" / L"Mods" / L"taskbar-clock-customization.ini";
-        if (!std::filesystem::exists(config_)) return;
         wchar_t modulePath[32768]{};
         GetModuleFileNameW(nullptr, modulePath, ARRAYSIZE(modulePath));
         const auto applicationDirectory = std::filesystem::path{modulePath}.parent_path();
+        const auto extensionRoot = applicationDirectory / L"TaskbarExtension";
+        config_ = extensionRoot / L"AppData" / L"Engine" / L"Mods" / L"taskbar-clock-customization.ini";
+        if (!std::filesystem::exists(config_)) return;
         const auto library = applicationDirectory / L"WinCalTaskbarClock.dll";
         const auto host = applicationDirectory / L"WinCalTaskbarHost.exe";
         if (!std::filesystem::exists(library) || !std::filesystem::exists(host)) return;
         if (!CopyFileW(library.c_str(), (config_.parent_path() / L"64" / L"WinCalTaskbarClock.dll").c_str(), FALSE)) return;
         WritePrivateProfileStringW(L"Mod", L"LibraryFileName", L"WinCalTaskbarClock.dll", config_.c_str());
-        WritePrivateProfileStringW(L"Settings", L"TooltipLine", L"WinCal 天气与农历", config_.c_str());
+        WritePrivateProfileStringW(L"Settings", L"TooltipLine", L"", config_.c_str());
+        WritePrivateProfileStringW(L"Settings", L"TooltipLineMode", L"replace", config_.c_str());
         ConfigureFormat(format);
         WSADATA sockets{};
         if (WSAStartup(MAKEWORD(2, 2), &sockets)) return;
@@ -66,10 +67,9 @@ public:
         SetTimer(window_, 1, 1000, nullptr);
         worker_ = std::jthread([this](std::stop_token stop) { Serve(stop); });
         WritePrivateProfileStringW(L"Mod", L"Disabled", L"0", config_.c_str());
-        const auto root = config_.parent_path().parent_path().parent_path().parent_path();
         const std::wstring eventName = L"Local\\WinCalClockStop-" + std::to_wstring(GetCurrentProcessId());
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, eventName.c_str());
-        std::wstring command = L"\"" + host.wstring() + L"\" \"" + root.wstring() + L"\" " +
+        std::wstring command = L"\"" + host.wstring() + L"\" \"" + extensionRoot.wstring() + L"\" " +
             std::to_wstring(GetCurrentProcessId()) + L" \"" + eventName + L"\"";
         STARTUPINFOW startup{sizeof(startup)};
         startup.dwFlags = STARTF_USESHOWWINDOW;

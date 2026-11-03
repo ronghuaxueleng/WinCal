@@ -4533,7 +4533,8 @@ void UpdateToolTipString(LPVOID tooltipPtrPtr) {
                                        g_settings.tooltipLine.get());
     }
 
-    if (extraLength == 0) {
+    if (extraLength == 0 &&
+        g_settings.tooltipLineMode != TooltipLineMode::replace) {
         return;
     }
 
@@ -4554,6 +4555,13 @@ void UpdateToolTipString(LPVOID tooltipPtrPtr) {
 
     shared_hstring_header* tooltipHeader =
         *(shared_hstring_header**)tooltipPtrPtr;
+
+    if (extraLength == 0) {
+        tooltipHeader->length = 0;
+        tooltipHeader->buffer[0] = L'\0';
+        tooltipHeader->ptr = tooltipHeader->buffer;
+        return;
+    }
 
     uint64_t bytesRequired = sizeof(shared_hstring_header);
     if (g_settings.tooltipLineMode == TooltipLineMode::replace) {
@@ -5303,8 +5311,12 @@ HRESULT WINAPI ClockButton_v_GetTooltipText_Hook(LPVOID pThis,
         std::lock_guard<std::mutex> guard(g_formatLineMutex);
 
         if (g_settings.tooltipLineMode == TooltipLineMode::replace) {
-            FormatLineNoLock(g_getTooltipTextBuffer, g_getTooltipTextBufferSize,
-                             g_settings.tooltipLine.get());
+            if (g_settings.tooltipLine.get()[0]) {
+                FormatLineNoLock(g_getTooltipTextBuffer, g_getTooltipTextBufferSize,
+                                 g_settings.tooltipLine.get());
+            } else if (g_getTooltipTextBufferSize > 0) {
+                g_getTooltipTextBuffer[0] = L'\0';
+            }
         } else {
             size_t stringLen = wcslen(g_getTooltipTextBuffer);
             WCHAR* p = g_getTooltipTextBuffer + stringLen;

@@ -47,8 +47,9 @@ constexpr wchar_t kWindowClass[] = L"WinCalNativePopup";
 constexpr wchar_t kSettingsWindowClass[] = L"WinCalNativeSettings";
 constexpr wchar_t kWeatherWindowClass[] = L"WinCalNativeWeather";
 constexpr wchar_t kDetailWindowClass[] = L"WinCalNativeEventDetails";
+constexpr wchar_t kContextMenuWindowClass[] = L"WinCalNativeContextMenu";
 constexpr wchar_t kWindowTitle[] = L"WinCal";
-constexpr UINT kTrayMessage = WM_APP + 1;
+
 constexpr UINT kShowPopupMessage = WM_APP + 2;
 constexpr UINT kScheduleOutsideHideMessage = WM_APP + 3;
 constexpr UINT kCalendarDataUpdatedMessage = WM_APP + 4;
@@ -56,10 +57,13 @@ constexpr UINT kSettingsChangedMessage = WM_APP + 5;
 constexpr UINT kShowSettingsMessage = WM_APP + 6;
 constexpr UINT kTaskbarClockClickMessage = WM_APP + 7;
 constexpr UINT kWeatherUpdatedMessage = WM_APP + 8;
+constexpr UINT kTaskbarClockContextMenuMessage = WM_APP + 9;
+constexpr UINT kDismissContextMenuMessage = WM_APP + 10;
 constexpr UINT kAnimationTimer = 1;
 constexpr UINT kOutsideClickTimer = 2;
 constexpr UINT kCalendarRefreshTimer = 3;
 constexpr UINT kClockTimer = 4;
+constexpr UINT kTaskbarBoundsTimer = 5;
 constexpr DWORD kEventObjectUncloak = 0x8018;
 constexpr UINT kMenuSettings = 1001;
 constexpr UINT kMenuExit = 1002;
@@ -76,7 +80,7 @@ float CalendarFontScale(int offset)
 constexpr int kLogicalWidth = 430;
 constexpr int kClockHeight = 86;
 constexpr int kLogicalHeight = 466 + kClockHeight;
-constexpr int kSettingsLogicalWidth = 514;
+constexpr int kSettingsLogicalWidth = 680;
 constexpr int kSettingsLogicalHeight = 592;
 constexpr int kDetailLogicalWidth = 360;
 constexpr int kDetailLogicalHeight = 286;
@@ -505,6 +509,22 @@ public:
         UpdateSettingsSourceControls(window);
         controlsOk &= IsWindowEnabled(GetDlgItem(window, kSettingIcsUrls)) != 0;
         click(kSettingPageGeneral);
+        POINT navigationPoint{SettingsPx(80), SettingsPx(160)};
+        const LPARAM navigationPosition = MAKELPARAM(navigationPoint.x, navigationPoint.y);
+        HandleSettingsMessage(window, WM_MOUSEWHEEL,
+            MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), navigationPosition);
+        controlsOk &= settingsPage_ == 3;
+        HandleSettingsMessage(window, WM_MOUSEWHEEL,
+            MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), navigationPosition);
+        controlsOk &= settingsPage_ == 2;
+        POINT contentPoint{SettingsPx(300), SettingsPx(240)};
+        const LPARAM contentPosition = MAKELPARAM(contentPoint.x, contentPoint.y);
+        HandleSettingsMessage(window, WM_MOUSEWHEEL,
+            MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), contentPosition);
+        controlsOk &= settingsPage_ == 3;
+        HandleSettingsMessage(window, WM_MOUSEWHEEL,
+            MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), contentPosition);
+        controlsOk &= settingsPage_ == 2;
         const int before = SettingSelection(window, kSettingAutoStartup);
         click(kSettingAutoStartup);
         controlsOk &= SettingSelection(window, kSettingAutoStartup) != before;
@@ -542,7 +562,7 @@ public:
         RECT smallClient{};
         GetClientRect(window, &smallClient);
         controlsOk &= settingsScrollX_ > 0 && settingsScrollY_ > 0;
-        controlsOk &= SettingsPx(486) - settingsScrollX_ <= smallClient.right;
+        controlsOk &= SettingsPx(kSettingsLogicalWidth - 28) - settingsScrollX_ <= smallClient.right;
         controlsOk &= SettingsPx(568) - settingsScrollY_ <= smallClient.bottom;
         SetWindowPos(window, nullptr, 0, 0, SettingsPx(kSettingsLogicalWidth), SettingsPx(kSettingsLogicalHeight), SWP_NOZORDER | SWP_NOMOVE);
         settingsScrollX_ = settingsScrollY_ = 0;
@@ -959,6 +979,7 @@ public:
 
         taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
         if (!RegisterWindowClass() || !RegisterSettingsWindowClass() ||
+            !RegisterContextMenuWindowClass() ||
             !RegisterDetailWindowClass() || !RegisterAgendaWindowClass() || !CreateMainWindow())
             return 1;
 
@@ -966,10 +987,11 @@ public:
         weatherAutoLocation_ = settings_.weatherAutoLocation;
         StartWeatherRefresh();
         UpdateCalendarDiagnostics();
-        AddTrayIcon();
         UpdateTaskbarStatus();
         StartSystemCalendarInterceptor();
+        RefreshTaskbarClockBounds();
         StartGlobalMouseMonitor();
+        SetTimer(window_, kTaskbarBoundsTimer, 2000, nullptr);
         StartCalendarRefresh();
         SetTimer(window_, kCalendarRefreshTimer, 60000, nullptr);
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
@@ -1001,7 +1023,6 @@ public:
         }
         StopGlobalMouseMonitor();
         StopSystemCalendarInterceptor();
-        RemoveTrayIcon();
         DiscardDeviceResources();
         CoUninitialize();
         return static_cast<int>(message.wParam);
@@ -1414,6 +1435,24 @@ private:
                    : DefWindowProcW(window, message, wParam, lParam);
     }
 
+    static LRESULT CALLBACK ContextMenuWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        App* app = nullptr;
+        if (message == WM_NCCREATE)
+        {
+            auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            app = static_cast<App*>(create->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+            app->contextMenuWindow_ = window;
+        }
+        else
+        {
+            app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        }
+        return app ? app->HandleContextMenuMessage(window, message, wParam, lParam)
+                   : DefWindowProcW(window, message, wParam, lParam);
+    }
+
     bool RegisterWindowClass() const
     {
         WNDCLASSEXW windowClass{sizeof(windowClass)};
@@ -1453,6 +1492,16 @@ private:
         windowClass.hbrBackground = nullptr;
         windowClass.lpszClassName = kDetailWindowClass;
         windowClass.hIconSm = windowClass.hIcon;
+        return RegisterClassExW(&windowClass) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+
+    bool RegisterContextMenuWindowClass() const
+    {
+        WNDCLASSEXW windowClass{sizeof(windowClass)};
+        windowClass.lpfnWndProc = ContextMenuWindowProc;
+        windowClass.hInstance = instance_;
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.lpszClassName = kContextMenuWindowClass;
         return RegisterClassExW(&windowClass) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
     }
 
@@ -1561,6 +1610,16 @@ private:
                                                 LPARAM lParam, UINT_PTR, DWORD_PTR data)
     {
         auto* app = reinterpret_cast<App*>(data);
+        if (message == WM_MOUSEWHEEL)
+        {
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            RECT controlRect{};
+            GetWindowRect(window, &controlRect);
+            wchar_t className[16]{};
+            GetClassNameW(window, className, ARRAYSIZE(className));
+            if (wcscmp(className, L"EDIT") != 0 || !PtInRect(&controlRect, point))
+                return app->HandleSettingsMessage(GetParent(window), message, wParam, lParam);
+        }
         if (message == WM_MOUSEMOVE)
         {
             if (app->settingsHotControl_ != window)
@@ -1693,37 +1752,37 @@ private:
         {
             return AddSettingControl(window, L"BUTTON", text, BS_OWNERDRAW, id, x, y, w, h, page);
         };
-        button(L"外观", kSettingPageAppearance, 28, 84, 104, 36);
-        button(L"日历来源", kSettingPageSource, 140, 84, 112, 36);
-        button(L"常规", kSettingPageGeneral, 260, 84, 104, 36);
-        button(L"天气", kSettingPageWeather, 372, 84, 114, 36);
+        button(L"外观", kSettingPageAppearance, 28, 146, 118, 40);
+        button(L"日历来源", kSettingPageSource, 28, 196, 118, 40);
+        button(L"常规", kSettingPageGeneral, 28, 246, 118, 40);
+        button(L"天气", kSettingPageWeather, 28, 296, 118, 40);
 
-        button(L"跟随系统", kSettingTheme, 48, 218, 134, 42, 0);
-        button(L"浅色", kSettingThemeLight, 190, 218, 134, 42, 0);
-        button(L"深色", kSettingThemeDark, 332, 218, 134, 42, 0);
-        button(L"−", kSettingFontMinus, 326, 316, 36, 36, 0);
+        button(L"跟随系统", kSettingTheme, 178, 218, 134, 42, 0);
+        button(L"浅色", kSettingThemeLight, 320, 218, 134, 42, 0);
+        button(L"深色", kSettingThemeDark, 462, 218, 134, 42, 0);
+        button(L"−", kSettingFontMinus, 456, 316, 36, 36, 0);
         AddSettingControl(window, L"EDIT", L"0", ES_CENTER | ES_AUTOHSCROLL,
-                          kSettingFontOffset, 370, 324, 52, 22, 0);
-        button(L"+", kSettingFontPlus, 430, 316, 36, 36, 0);
+                          kSettingFontOffset, 500, 324, 52, 22, 0);
+        button(L"+", kSettingFontPlus, 560, 316, 36, 36, 0);
 
-        button(L"", kSettingDataSource, 48, 208, 254, 38, 1);
-        button(L"", kSettingRefresh, 318, 208, 148, 38, 1);
+        button(L"", kSettingDataSource, 178, 208, 254, 38, 1);
+        button(L"", kSettingRefresh, 448, 208, 148, 38, 1);
         AddSettingControl(window, L"EDIT", L"", ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                          kSettingIcsUrls, 60, 318, 394, 98, 1);
+                          kSettingIcsUrls, 190, 318, 394, 98, 1);
 
-        button(L"开机启动", kSettingAutoStartup, 410, 190, 56, 30, 2);
-        button(L"", kSettingWeekStart, 266, 270, 200, 38, 2);
-        button(L"整月翻滚", kSettingMonthPaging, 410, 352, 56, 30, 2);
-        button(L"任务栏时钟", kSettingTaskbarStatus, 410, 430, 56, 30, 2);
-        button(L"显示格式…", kSettingTaskbarFormatPage, 340, 471, 126, 24, 2);
+        button(L"开机启动", kSettingAutoStartup, 540, 190, 56, 30, 2);
+        button(L"", kSettingWeekStart, 396, 270, 200, 38, 2);
+        button(L"整月翻滚", kSettingMonthPaging, 540, 352, 56, 30, 2);
+        button(L"任务栏时钟", kSettingTaskbarStatus, 540, 430, 56, 30, 2);
+        button(L"显示格式…", kSettingTaskbarFormatPage, 470, 471, 126, 24, 2);
         AddSettingControl(window, L"EDIT", L"", ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                          kSettingTaskbarFormat, 48, 206, 418, 62, 4);
+                          kSettingTaskbarFormat, 178, 206, 418, 62, 4);
         SendDlgItemMessageW(window, kSettingTaskbarFormat, EM_SETLIMITTEXT, 512, 0);
-        button(L"", kSettingWeatherLocation, 48, 218, 418, 38, 3);
+        button(L"", kSettingWeatherLocation, 178, 218, 418, 38, 3);
 
         button(L"恢复默认", kSettingDefaults, 28, 532, 104, 36);
-        button(L"取消", kSettingCancel, 272, 532, 88, 36);
-        button(L"保存设置", kSettingSave, 372, 532, 114, 36);
+        button(L"取消", kSettingCancel, 438, 532, 88, 36);
+        button(L"保存设置", kSettingSave, 538, 532, 114, 36);
         PopulateSettingsControls(window);
         UpdateSettingsFontControls(window);
         SelectSettingsPage(window, 0);
@@ -1779,6 +1838,7 @@ private:
         settings_ = settingsSaveAccepted_ ? settingsDraft_ : settingsBeforeEdit_;
         settingsBeforeEdit_ = {};
         RefreshCalendarAppearance();
+        if (IsWindowVisible(window_)) PositionNearTray(false);
     }
 
     void PositionLivePreview()
@@ -1888,78 +1948,78 @@ private:
         SettingsText(dc, L"设置", 78, 20, 180, 32, settingsTitleFont_, p.primary);
         SettingsText(dc, L"让每一天，都按你的习惯呈现。", 78, 54, 360, 18, settingsCaptionFont_, p.secondary);
 
-        SettingsBox(dc, SettingsRect(28, 136, 458, 364), p.card, p.border, 16);
+        SettingsBox(dc, SettingsRect(162, 136, 490, 364), p.card, p.border, 16);
         if (settingsPage_ == 0)
         {
-            SettingsText(dc, L"外观与字号", 48, 154, 280, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"主题模式", 48, 190, 220, 20, settingsBodyFont_, p.secondary);
-            SettingsText(dc, L"文字大小", 48, 306, 220, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"仅调整日历中的文字", 48, 334, 230, 20, settingsCaptionFont_, p.secondary);
-            SettingsBox(dc, SettingsRect(367, 316, 58, 36), p.input,
+            SettingsText(dc, L"外观与字号", 178, 154, 280, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"主题模式", 178, 190, 220, 20, settingsBodyFont_, p.secondary);
+            SettingsText(dc, L"文字大小", 178, 306, 220, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"仅调整日历中的文字", 178, 334, 230, 20, settingsCaptionFont_, p.secondary);
+            SettingsBox(dc, SettingsRect(497, 316, 58, 36), p.input,
                         GetFocus() == GetDlgItem(window, kSettingFontOffset) ? p.accent : p.border, 8);
-            SettingsText(dc, L"可调范围 −2 至 +10", 304, 362, 162, 20, settingsCaptionFont_, p.secondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            SettingsBox(dc, SettingsRect(48, 406, 418, 66), p.input, p.input, 12);
-            SettingsText(dc, L"在日历窗口中实时预览", 64, 416, 360, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"保存以保留修改；取消会恢复原来的效果。", 64, 440, 376, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"可调范围 −2 至 +10", 434, 362, 162, 20, settingsCaptionFont_, p.secondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            SettingsBox(dc, SettingsRect(178, 406, 418, 66), p.input, p.input, 12);
+            SettingsText(dc, L"在日历窗口中实时预览", 194, 416, 360, 22, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"保存以保留修改；取消会恢复原来的效果。", 194, 440, 376, 20, settingsCaptionFont_, p.secondary);
         }
         else if (settingsPage_ == 1)
         {
             const bool useIcs = SettingSelection(window, kSettingDataSource) != 0;
-            SettingsText(dc, L"日历与订阅", 48, 154, 280, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"日历来源", 48, 182, 240, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"自动刷新", 318, 182, 148, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"ICS 订阅链接", 48, 264, 300, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"每行一条公开的 .ics 链接", 48, 288, 400, 20, settingsCaptionFont_, p.secondary);
-            SettingsBox(dc, SettingsRect(48, 310, 418, 118), p.input,
+            SettingsText(dc, L"日历与订阅", 178, 154, 280, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"日历来源", 178, 182, 240, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"自动刷新", 448, 182, 148, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"ICS 订阅链接", 178, 264, 300, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"每行一条公开的 .ics 链接", 178, 288, 400, 20, settingsCaptionFont_, p.secondary);
+            SettingsBox(dc, SettingsRect(178, 310, 418, 118), p.input,
                         GetFocus() == GetDlgItem(window, kSettingIcsUrls) ? p.accent : p.border, 10);
             SettingsText(dc, useIcs ? L"保存后后台刷新，已有缓存会立即用于展示。" : L"当前使用系统日历，切换来源后可编辑订阅。",
-                         48, 444, 418, 26, settingsCaptionFont_, p.secondary);
+                         178, 444, 418, 26, settingsCaptionFont_, p.secondary);
             SettingsText(dc, L"中国节假日与调休：提莫接口，每日自动更新。",
-                         48, 476, 418, 22, settingsCaptionFont_, p.secondary);
+                         178, 476, 418, 22, settingsCaptionFont_, p.secondary);
         }
         else if (settingsPage_ == 2)
         {
-            SettingsText(dc, L"启动与日历布局", 48, 154, 320, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"开机启动", 48, 186, 320, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"登录 Windows 后自动运行 WinCal", 48, 212, 338, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"每周开始", 48, 268, 200, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"选择日历每一行的第一天", 48, 294, 210, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"整月翻滚", 48, 352, 320, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"关闭后翻月时逐周平滑滚动", 48, 378, 338, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"任务栏双行时钟", 48, 430, 320, 24, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"保存后生效，可自定义显示格式。", 48, 460, 280, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"启动与日历布局", 178, 154, 320, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"开机启动", 178, 186, 320, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"登录 Windows 后自动运行 WinCal", 178, 212, 338, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"每周开始", 178, 268, 200, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"选择日历每一行的第一天", 178, 294, 210, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"整月翻滚", 178, 352, 320, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"关闭后翻月时逐周平滑滚动", 178, 378, 338, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"任务栏双行时钟", 178, 430, 320, 24, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"保存后生效，可自定义显示格式。", 178, 460, 280, 22, settingsCaptionFont_, p.secondary);
         }
         else if (settingsPage_ == 3)
         {
-            SettingsText(dc, L"天气与位置", 48, 154, 320, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"定位方式", 48, 190, 320, 20, settingsBodyFont_, p.secondary);
-            SettingsText(dc, L"自动定位优先使用 Windows 位置服务。", 48, 282, 418, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"无法获取时使用网络定位，仍不可用时默认北京。", 48, 310, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"天气与位置", 178, 154, 320, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"定位方式", 178, 190, 320, 20, settingsBodyFont_, p.secondary);
+            SettingsText(dc, L"自动定位优先使用 Windows 位置服务。", 178, 282, 418, 22, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"无法获取时使用网络定位，仍不可用时默认北京。", 178, 310, 418, 22, settingsCaptionFont_, p.secondary);
             const auto weather = weatherData_.Snapshot();
             const std::wstring position = weather.available ? L"当前：" + weather.location.city + L" · " + weather.location.source : L"当前：正在获取位置与天气";
-            SettingsText(dc, position.c_str(), 48, 338, 418, 22, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"点击日历顶部天气，查看未来 7 天温度曲线。", 48, 366, 418, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"天气每 15 分钟更新，也可在详情中手动刷新。", 48, 398, 418, 22, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"天气数据：Open-Meteo  ·  网络定位：ipwho.is", 48, 454, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, position.c_str(), 178, 338, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"点击日历顶部天气，查看未来 7 天温度曲线。", 178, 366, 418, 22, settingsBodyFont_, p.primary);
+            SettingsText(dc, L"天气每 15 分钟更新，也可在详情中手动刷新。", 178, 398, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"天气数据：Open-Meteo  ·  网络定位：ipwho.is", 178, 454, 418, 22, settingsCaptionFont_, p.secondary);
         }
         else
         {
-            SettingsText(dc, L"任务栏显示格式", 48, 154, 320, 24, settingsLabelFont_, p.primary);
-            SettingsText(dc, L"使用 \\n 分隔上下两行，或直接按回车换行。", 48, 183, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"预览", 48, 285, 418, 22, settingsBodyFont_, p.secondary);
+            SettingsText(dc, L"任务栏显示格式", 178, 154, 320, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"使用 \\n 分隔上下两行，或直接按回车换行。", 178, 183, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"预览", 178, 285, 418, 22, settingsBodyFont_, p.secondary);
             SYSTEMTIME now{}; GetLocalTime(&now);
             const auto fields = CurrentTaskbarFields();
             const auto preview = wincal::FormatTaskbar(ReadControlText(GetDlgItem(window, kSettingTaskbarFormat)), now,
                 [&](size_t i) { return fields[i]; });
-            SettingsText(dc, preview.c_str(), 48, 316, 418, 60, settingsBodyFont_, p.primary, DT_WORDBREAK);
-            SettingsText(dc, L"yyyy 年 / mm 月 / dd 日 / HH:ff:ss 时分秒", 48, 390, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"MD 农历 / ddd 周几 / shichen 时辰 / pos 城市", 48, 412, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"rtm 实时温度 / rhu 湿度 / rwd 风力风向", 48, 434, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"we1～we7 天气 / tl1～tl7 最低温 / th1～th7 最高温", 48, 456, 418, 20, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"序号 1 表示今天，2 表示明天；缺少数据时显示 —。", 48, 478, 418, 18, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, preview.c_str(), 178, 316, 418, 60, settingsBodyFont_, p.primary, DT_WORDBREAK);
+            SettingsText(dc, L"yyyy 年 / mm 月 / dd 日 / HH:ff:ss 时分秒", 178, 390, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"MD 农历 / ddd 周几 / shichen 时辰 / pos 城市", 178, 412, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"rtm 实时温度 / rhu 湿度 / rwd 风力风向", 178, 434, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"we1～we7 天气 / tl1～tl7 最低温 / th1～th7 最高温", 178, 456, 418, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"序号 1 表示今天，2 表示明天；缺少数据时显示 —。", 178, 478, 418, 18, settingsCaptionFont_, p.secondary);
         }
 
-        RECT line = SettingsRect(28, 516, 458, 1);
+        RECT line = SettingsRect(28, 516, 624, 1);
         const auto lineBrush = CreateSolidBrush(p.border);
         FillRect(dc, &line, lineBrush);
         DeleteObject(lineBrush);
@@ -2031,27 +2091,6 @@ private:
         return TRUE;
     }
 
-    void AddTrayIcon()
-    {
-        tray_ = {};
-        tray_.cbSize = sizeof(tray_);
-        tray_.hWnd = window_;
-        tray_.uID = 1;
-        tray_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-        tray_.uCallbackMessage = kTrayMessage;
-        tray_.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
-        wcscpy_s(tray_.szTip, L"WinCal 原生日历");
-        Shell_NotifyIconW(NIM_ADD, &tray_);
-        tray_.uVersion = NOTIFYICON_VERSION_4;
-        Shell_NotifyIconW(NIM_SETVERSION, &tray_);
-    }
-
-    void RemoveTrayIcon()
-    {
-        if (tray_.hWnd)
-            Shell_NotifyIconW(NIM_DELETE, &tray_);
-    }
-
     void TogglePopup()
     {
         if (IsWindowVisible(window_))
@@ -2068,6 +2107,7 @@ private:
         KillTimer(window_, kOutsideClickTimer);
         if (IsWindowVisible(window_))
         {
+            PositionNearTray(preferCursorMonitor);
             SetForegroundWindow(window_);
             SetFocus(window_);
             return;
@@ -2129,13 +2169,7 @@ private:
         }
         else
         {
-            RECT iconRect{};
-            NOTIFYICONIDENTIFIER identifier{sizeof(identifier)};
-            identifier.hWnd = window_;
-            identifier.uID = tray_.uID;
-            if (SUCCEEDED(Shell_NotifyIconGetRect(&identifier, &iconRect)))
-                monitor = MonitorFromRect(&iconRect, MONITOR_DEFAULTTONEAREST);
-            else if (GetCursorPos(&cursor))
+            if (GetCursorPos(&cursor))
                 monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
             else
                 monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
@@ -2160,6 +2194,19 @@ private:
             }
             return nullptr;
         }();
+
+        RECT clockRect{};
+        bool hasClockRect{};
+        for (const auto& entry : taskbarClockBounds_)
+        {
+            const auto& bounds = entry.second;
+            if (MonitorFromRect(&bounds, MONITOR_DEFAULTTONEAREST) == monitor)
+            {
+                clockRect = bounds;
+                hasClockRect = true;
+                break;
+            }
+        }
 
         TaskbarEdge edge = TaskbarEdge::Unknown;
         RECT taskbarRect{};
@@ -2199,7 +2246,6 @@ private:
         const UINT targetDpi = taskbarDpi ? taskbarDpi : (dpi_ ? dpi_ : 96);
         const int width = MulDiv(kLogicalWidth, targetDpi, 96);
         const int height = MulDiv(kLogicalHeight, targetDpi, 96);
-        const int taskbarGap = MulDiv(8, targetDpi, 96);
         const int endMargin = MulDiv(12, targetDpi, 96);
 
         int x{};
@@ -2207,21 +2253,21 @@ private:
         switch (edge)
         {
         case TaskbarEdge::Top:
-            x = info.rcWork.right - width - endMargin;
-            y = info.rcWork.top + taskbarGap;
+            x = hasClockRect ? clockRect.right - width : info.rcWork.right - width - endMargin;
+            y = taskbarForMonitor ? taskbarRect.bottom : info.rcWork.top;
             break;
         case TaskbarEdge::Left:
-            x = info.rcWork.left + taskbarGap;
-            y = info.rcWork.bottom - height - endMargin;
+            x = taskbarForMonitor ? taskbarRect.right : info.rcWork.left;
+            y = hasClockRect ? clockRect.bottom - height : info.rcWork.bottom - height - endMargin;
             break;
         case TaskbarEdge::Right:
-            x = info.rcWork.right - width - taskbarGap;
-            y = info.rcWork.bottom - height - endMargin;
+            x = taskbarForMonitor ? taskbarRect.left - width : info.rcWork.right - width;
+            y = hasClockRect ? clockRect.bottom - height : info.rcWork.bottom - height - endMargin;
             break;
         case TaskbarEdge::Bottom:
         case TaskbarEdge::Unknown:
-            x = info.rcWork.right - width - endMargin;
-            y = info.rcWork.bottom - height - taskbarGap;
+            x = hasClockRect ? clockRect.right - width : info.rcWork.right - width - endMargin;
+            y = taskbarForMonitor ? taskbarRect.top - height : info.rcWork.bottom - height;
             break;
         }
 
@@ -2236,13 +2282,38 @@ private:
     static LRESULT CALLBACK MouseHookProc(int code, WPARAM message, LPARAM data)
     {
         if (code >= HC_ACTION && activeInstance_)
-            activeInstance_->HandleGlobalMouse(message, *reinterpret_cast<const MSLLHOOKSTRUCT*>(data));
+        {
+            if (activeInstance_->HandleGlobalMouse(message, *reinterpret_cast<const MSLLHOOKSTRUCT*>(data)))
+                return 1;
+        }
         return CallNextHookEx(nullptr, code, message, data);
     }
 
     void StartGlobalMouseMonitor()
     {
         mouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, instance_, 0);
+    }
+
+    void RefreshTaskbarClockBounds()
+    {
+        taskbarClockBounds_.clear();
+        const auto append = [this](HWND taskbar)
+        {
+            for (const auto& bounds : wincal::TaskbarClockBounds(taskbar))
+                if (bounds.right > bounds.left && bounds.bottom > bounds.top)
+                    taskbarClockBounds_.emplace_back(taskbar, bounds);
+        };
+        append(FindWindowW(L"Shell_TrayWnd", nullptr));
+        HWND secondary{};
+        while ((secondary = FindWindowExW(nullptr, secondary, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr)
+            append(secondary);
+
+    }
+
+    bool IsCachedTaskbarClockPoint(POINT point) const
+    {
+        return std::any_of(taskbarClockBounds_.begin(), taskbarClockBounds_.end(),
+            [point](const auto& entry) { return PtInRect(&entry.second, point) != FALSE; });
     }
 
     void StopGlobalMouseMonitor()
@@ -2254,75 +2325,57 @@ private:
         }
     }
 
-    bool IsPointInsideTrayIcon(POINT point) const
+    bool HandleGlobalMouse(WPARAM message, const MSLLHOOKSTRUCT& mouse)
     {
-        NOTIFYICONIDENTIFIER identifier{sizeof(identifier)};
-        identifier.hWnd = window_;
-        identifier.uID = tray_.uID;
-        RECT iconRect{};
-        return SUCCEEDED(Shell_NotifyIconGetRect(&identifier, &iconRect)) &&
-               PtInRect(&iconRect, point);
-    }
-
-    void HandleGlobalMouse(WPARAM message, const MSLLHOOKSTRUCT& mouse) const
-    {
-        if (settingsLivePreview_) return;
+        if (message == WM_RBUTTONUP && taskbarClockRightButtonPending_)
+        {
+            taskbarClockRightButtonPending_ = false;
+            return true;
+        }
+        if (settingsLivePreview_) return false;
+        if ((message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN) && IsWindowVisible(contextMenuWindow_))
+        {
+            RECT menuRect{};
+            if (GetWindowRect(contextMenuWindow_, &menuRect) && !PtInRect(&menuRect, mouse.pt))
+                PostMessageW(window_, kDismissContextMenuMessage, 0, 0);
+        }
+        if (message == WM_RBUTTONDOWN)
+        {
+            const bool onTaskbar = wincal::TaskbarAtPoint(mouse.pt) != nullptr;
+            const bool onClock = IsCachedTaskbarClockPoint(mouse.pt);
+            if (onTaskbar && onClock)
+            {
+                taskbarClockRightButtonPending_ = true;
+                PostMessageW(window_, kTaskbarClockContextMenuMessage, 0, 0);
+                return true;
+            }
+        }
         if (message != WM_LBUTTONDOWN)
-            return;
-        if (wincal::TaskbarAtPoint(mouse.pt) && !IsPointInsideTrayIcon(mouse.pt))
+            return false;
+        if (wincal::TaskbarAtPoint(mouse.pt))
         {
             PostMessageW(window_, kTaskbarClockClickMessage,
                          static_cast<WPARAM>(mouse.pt.x), static_cast<LPARAM>(mouse.pt.y));
-            return;
+            return false;
         }
         if (!IsWindowVisible(window_))
-            return;
+            return false;
 
         RECT popupRect{};
         if (GetWindowRect(window_, &popupRect) && PtInRect(&popupRect, mouse.pt))
-            return;
+            return false;
         RECT weatherRect{};
         if (IsWindowVisible(weatherWindow_) && GetWindowRect(weatherWindow_, &weatherRect) &&
-            PtInRect(&weatherRect, mouse.pt)) return;
+            PtInRect(&weatherRect, mouse.pt)) return false;
         RECT agendaRect{};
         if (IsWindowVisible(agendaWindow_) && GetWindowRect(agendaWindow_, &agendaRect) &&
-            PtInRect(&agendaRect, mouse.pt)) return;
+            PtInRect(&agendaRect, mouse.pt)) return false;
         RECT detailRect{};
         if (IsWindow(detailWindow_) && GetWindowRect(detailWindow_, &detailRect) &&
             PtInRect(&detailRect, mouse.pt))
-            return;
-        if (IsPointInsideTrayIcon(mouse.pt))
-            return;
-
+            return false;
         PostMessageW(window_, kScheduleOutsideHideMessage, 0, 0);
-    }
-
-    void BeginTrayClick()
-    {
-        trayPointerDown_ = true;
-        trayClickWasVisible_ = IsWindowVisible(window_) != FALSE;
-        KillTimer(window_, kOutsideClickTimer);
-    }
-
-    void EndTrayClick()
-    {
-        const bool shouldClose = trayPointerDown_
-            ? trayClickWasVisible_
-            : IsWindowVisible(window_) != FALSE;
-        trayPointerDown_ = false;
-        lastTrayMouseUpTick_ = GetTickCount64();
-
-        if (shouldClose)
-            HidePopup(HideReason::Tray);
-        else
-            ShowPopup(false);
-    }
-
-    void HandleTraySelect()
-    {
-        if (GetTickCount64() - lastTrayMouseUpTick_ < 250)
-            return;
-        TogglePopup();
+        return false;
     }
 
     static void CALLBACK WinEventProc(
@@ -2464,35 +2517,154 @@ private:
         // The posted clock-click message already toggles WinCal exactly once.
     }
 
+    LRESULT HandleContextMenuMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        const int padding = MulDiv(4, GetDpiForWindow(window), 96);
+        const int dpi = GetDpiForWindow(window);
+        const int rowHeight = MulDiv(32, dpi, 96);
+        const int width = MulDiv(196, dpi, 96);
+        const int top = MulDiv(8, dpi, 96);
+        const int separatorGap = MulDiv(16, dpi, 96);
+        const int height = top + rowHeight * 2 + separatorGap;
+        const int secondRowTop = top + rowHeight + separatorGap;
+        const int separatorY = top + rowHeight + separatorGap / 2;
+        switch (message)
+        {
+        case WM_MOUSEMOVE:
+        {
+            TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window, 0};
+            TrackMouseEvent(&track);
+            const int y = GET_Y_LPARAM(lParam);
+            const int item = y >= top && y < top + rowHeight ? 0 :
+                y >= secondRowTop && y < secondRowTop + rowHeight ? 1 : -1;
+            if (item != contextMenuHover_)
+            {
+                contextMenuHover_ = item;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            contextMenuHover_ = -1;
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONUP:
+        {
+            const int y = GET_Y_LPARAM(lParam);
+            const int item = y >= top && y < top + rowHeight ? kMenuSettings :
+                y >= secondRowTop && y < secondRowTop + rowHeight ? kMenuExit : 0;
+            ShowWindow(window, SW_HIDE);
+            if (item == kMenuSettings) ShowSettingsWindow();
+            else if (item == kMenuExit) DestroyWindow(window_);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) { ShowWindow(window, SW_HIDE); return 0; }
+            if (wParam == VK_RETURN)
+            {
+                ShowWindow(window, SW_HIDE);
+                if (contextMenuHover_ == 0) ShowSettingsWindow();
+                else if (contextMenuHover_ == 1) DestroyWindow(window_);
+                return 0;
+            }
+            return 0;
+        case WM_PAINT:
+        {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(window, &paint);
+            RECT bounds{0, 0, width, height};
+            HBRUSH background = CreateSolidBrush(RGB(43, 43, 43));
+            FillRect(dc, &bounds, background);
+            DeleteObject(background);
+            const auto drawRow = [&](int index, const wchar_t* text)
+            {
+                const int rowTop = index == 0 ? top : secondRowTop;
+                RECT row{padding, rowTop, width - padding, rowTop + rowHeight};
+                if (contextMenuHover_ == index)
+                {
+                    HBRUSH hover = CreateSolidBrush(RGB(61, 61, 61));
+                    HGDIOBJ oldBrush = SelectObject(dc, hover);
+                    HGDIOBJ oldOutline = SelectObject(dc, GetStockObject(NULL_PEN));
+                    const int radius = MulDiv(4, dpi, 96);
+                    RoundRect(dc, row.left, row.top, row.right, row.bottom, radius * 2, radius * 2);
+                    SelectObject(dc, oldOutline);
+                    SelectObject(dc, oldBrush);
+                    DeleteObject(hover);
+                }
+                SetTextColor(dc, RGB(255, 255, 255));
+                SetBkMode(dc, TRANSPARENT);
+                NONCLIENTMETRICSW metrics{sizeof(metrics)};
+                SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0);
+                HFONT font = CreateFontIndirectW(&metrics.lfMenuFont);
+                HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
+                RECT textRect = row;
+                textRect.left += MulDiv(12, GetDpiForWindow(window), 96);
+                ::DrawTextW(dc, text, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                if (oldFont) SelectObject(dc, oldFont);
+                if (font) DeleteObject(font);
+            };
+            drawRow(0, L"设置");
+            const int divider = separatorY;
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB(72, 72, 72));
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            MoveToEx(dc, padding + MulDiv(10, GetDpiForWindow(window), 96), divider, nullptr);
+            LineTo(dc, width - padding - MulDiv(10, GetDpiForWindow(window), 96), divider);
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+            drawRow(1, L"退出");
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+        case WM_NCDESTROY:
+            if (contextMenuWindow_ == window) contextMenuWindow_ = nullptr;
+            return DefWindowProcW(window, message, wParam, lParam);
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
     void ShowContextMenu()
     {
-        if (IsWindowVisible(window_))
-            HidePopup(HideReason::ContextMenu);
-
+        if (IsWindowVisible(window_)) HidePopup(HideReason::ContextMenu);
         POINT point{};
         GetCursorPos(&point);
-        HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
-        SetForegroundWindow(window_);
-        const UINT command = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-            point.x,
-            point.y,
-            0,
-            window_,
-            nullptr);
-        DestroyMenu(menu);
-
-        if (command == kMenuSettings)
+        RECT anchor{};
+        RECT taskbarRect{};
+        int width = MulDiv(196, GetDpiForWindow(window_), 96);
+        int height = MulDiv(88, GetDpiForWindow(window_), 96);
+        for (const auto& entry : taskbarClockBounds_)
         {
-            ShowSettingsWindow();
+            if (!PtInRect(&entry.second, point)) continue;
+            anchor = entry.second;
+            MONITORINFO monitor{sizeof(monitor)};
+            if (!GetWindowRect(entry.first, &taskbarRect) ||
+                !GetMonitorInfoW(MonitorFromWindow(entry.first, MONITOR_DEFAULTTONEAREST), &monitor)) break;
+            const bool horizontal = taskbarRect.right - taskbarRect.left >= taskbarRect.bottom - taskbarRect.top;
+            if (horizontal) point.x = anchor.right - width;
+            else point.y = anchor.top;
+            if (horizontal) point.y = taskbarRect.top <= monitor.rcMonitor.top ? taskbarRect.bottom : taskbarRect.top - height;
+            else point.x = taskbarRect.left <= monitor.rcMonitor.left ? taskbarRect.right : taskbarRect.left - width;
+            point.x = std::clamp(point.x, monitor.rcMonitor.left, monitor.rcMonitor.right - width);
+            point.y = std::clamp(point.y, monitor.rcMonitor.top, monitor.rcMonitor.bottom - height);
+            break;
         }
-        else if (command == kMenuExit)
+        if (IsWindow(contextMenuWindow_)) DestroyWindow(contextMenuWindow_);
+        contextMenuHover_ = -1;
+        contextMenuWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            kContextMenuWindowClass, L"WinCal context menu", WS_POPUP,
+            point.x, point.y, width, height, nullptr, nullptr, instance_, this);
+        if (contextMenuWindow_)
         {
-            DestroyWindow(window_);
+            const BOOL dark = TRUE;
+            DwmSetWindowAttribute(contextMenuWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+            const COLORREF border = RGB(64, 64, 64);
+            DwmSetWindowAttribute(contextMenuWindow_, DWMWA_BORDER_COLOR, &border, sizeof(border));
+            DWM_WINDOW_CORNER_PREFERENCE preference = DWMWCP_ROUND;
+            DwmSetWindowAttribute(contextMenuWindow_, DWMWA_WINDOW_CORNER_PREFERENCE,
+                &preference, sizeof(preference));
+            ShowWindow(contextMenuWindow_, SW_SHOWNOACTIVATE);
+            UpdateWindow(contextMenuWindow_);
         }
     }
 
@@ -2670,6 +2842,28 @@ private:
         case WM_HSCROLL:
         case WM_MOUSEWHEEL:
         {
+            if (message == WM_MOUSEWHEEL)
+            {
+                POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                ScreenToClient(window, &point);
+                const int navLeft = SettingsPx(28) - settingsScrollX_;
+                const int navTop = SettingsPx(136) - settingsScrollY_;
+                const int navRight = navLeft + SettingsPx(118);
+                const int panelLeft = SettingsPx(162) - settingsScrollX_;
+                const int panelRight = SettingsPx(652) - settingsScrollX_;
+                const int panelBottom = SettingsPx(500) - settingsScrollY_;
+                const bool overNavigation = point.x >= navLeft && point.x < navRight &&
+                    point.y >= navTop && point.y < panelBottom;
+                const bool overContent = point.x >= panelLeft && point.x < panelRight &&
+                    point.y >= navTop && point.y < panelBottom;
+                if (overNavigation || overContent)
+                {
+                    const int currentPage = settingsPage_ == 4 ? 2 : settingsPage_;
+                    const int step = GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1;
+                    SelectSettingsPage(window, std::clamp(currentPage + step, 0, 3));
+                    return 0;
+                }
+            }
             const bool horizontal = message == WM_HSCROLL;
             const int bar = horizontal ? SB_HORZ : SB_VERT;
             SCROLLINFO info{sizeof(SCROLLINFO), SIF_ALL};
@@ -4111,8 +4305,13 @@ private:
         auto weather = weatherData_.Snapshot();
 #ifdef WINCAL_SETTINGS_PREVIEW
         now = {2026, 11, 1, 2, 21, 30, 5, 0};
-        weather = {{39.9042, 116.4074, L"北京", L"网络定位"}, 12.0, 2, true, true, false,
-                   std::chrono::system_clock::now()};
+        weather.location = {39.9042, 116.4074, L"北京", L"网络定位"};
+        weather.temperature = 12.0;
+        weather.code = 2;
+        weather.daylight = true;
+        weather.available = true;
+        weather.failed = false;
+        weather.updatedAt = std::chrono::system_clock::now();
 #endif
         wchar_t time[24]{};
         swprintf_s(time, L"%02d:%02d:%02d", now.wHour, now.wMinute, now.wSecond);
@@ -4424,8 +4623,8 @@ private:
     {
         if (message == taskbarCreatedMessage_)
         {
-            AddTrayIcon();
             UpdateTaskbarStatus();
+            RefreshTaskbarClockBounds();
             return 0;
         }
 
@@ -4463,7 +4662,11 @@ private:
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }
+        case WM_DISPLAYCHANGE:
+            RefreshTaskbarClockBounds();
+            return 0;
         case WM_SETTINGCHANGE:
+            RefreshTaskbarClockBounds();
             if (!settingsLivePreview_) settings_ = wincal::SettingsStore::Load();
             ApplyDwmAppearance();
             DiscardDeviceResources();
@@ -4600,6 +4803,12 @@ private:
             }
             return DefWindowProcW(window_, message, wParam, lParam);
         case WM_TIMER:
+            if (wParam == kTaskbarBoundsTimer)
+            {
+                KillTimer(window_, kTaskbarBoundsTimer);
+                RefreshTaskbarClockBounds();
+                return 0;
+            }
             if (wParam == kClockTimer)
             {
                 const RECT clockRect{0, 0, static_cast<LONG>(Scale(kLogicalWidth)), static_cast<LONG>(Scale(kClockHeight))};
@@ -4666,34 +4875,17 @@ private:
             // 弹窗收起由全局鼠标监听处理，避免点击托盘时的焦点消息与
             // Shell_NotifyIcon 回调交错，造成一次点击执行两次显示切换。
             return 0;
-        case kTrayMessage:
-            switch (LOWORD(lParam))
-            {
-            case WM_LBUTTONDOWN:
-                BeginTrayClick();
-                break;
-            case WM_LBUTTONUP:
-                EndTrayClick();
-                break;
-            case NIN_SELECT:
-                HandleTraySelect();
-                break;
-            case NIN_KEYSELECT:
-                TogglePopup();
-                break;
-            case WM_RBUTTONUP:
-            case WM_CONTEXTMENU:
-                ShowContextMenu();
-                break;
-            default:
-                break;
-            }
-            return 0;
         case kShowPopupMessage:
             ShowPopup(true);
             return 0;
+        case kTaskbarClockContextMenuMessage:
+            ShowContextMenu();
+            return 0;
+        case kDismissContextMenuMessage:
+            if (IsWindow(contextMenuWindow_)) ShowWindow(contextMenuWindow_, SW_HIDE);
+            return 0;
         case kTaskbarClockClickMessage:
-            if (wincal::IsTaskbarClockPoint({static_cast<LONG>(wParam), static_cast<LONG>(lParam)}))
+            if (IsCachedTaskbarClockPoint({static_cast<LONG>(wParam), static_cast<LONG>(lParam)}))
             {
                 lastClockClickTick_ = GetTickCount64();
                 TogglePopup();
@@ -4735,7 +4927,6 @@ private:
             RemovePropW(window_, L"WinCal.TomorrowEventCount");
             StopGlobalMouseMonitor();
             StopSystemCalendarInterceptor();
-            RemoveTrayIcon();
             PostQuitMessage(0);
             return 0;
         default:
@@ -4747,6 +4938,8 @@ private:
 
     HINSTANCE instance_{};
     HWND window_{};
+    HWND contextMenuWindow_{};
+    int contextMenuHover_{-1};
     HWND settingsWindow_{};
 #ifdef WINCAL_SETTINGS_PREVIEW
     bool agendaPreview_{};
@@ -4782,15 +4975,17 @@ private:
     HFONT settingsLabelFont_{};
     HBRUSH settingsInputBrush_{};
     HBRUSH settingsCardBrush_{};
-    NOTIFYICONDATAW tray_{};
+
     HHOOK mouseHook_{};
+    std::vector<std::pair<HWND, RECT>> taskbarClockBounds_;
     HWINEVENTHOOK calendarHook_{};
     std::vector<HWND> hiddenCalendarWindows_;
     std::mutex hiddenCalendarWindowsMutex_;
     ULONGLONG lastClockClickTick_{};
-    ULONGLONG lastTrayMouseUpTick_{};
-    bool trayPointerDown_{};
-    bool trayClickWasVisible_{};
+
+
+
+    bool taskbarClockRightButtonPending_{};
     UINT taskbarCreatedMessage_{};
     UINT dpi_{96};
     bool dark_{};

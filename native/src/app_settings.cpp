@@ -194,7 +194,7 @@ AppSettings SettingsStore::Load()
     settings.icsAliases = StringArray(content, "IcsAliases");
     settings.icsRefreshMinutes = std::clamp(IntegerValue(content, "IcsRefreshMinutes", 30), 1, 1440);
     settings.upcomingDays = std::clamp(IntegerValue(content, "UpcomingDays", 3), 1, 30);
-    settings.weekStartDay = Utf8ToWide(StringValue(content, "WeekStartDay", "Sunday"));
+    settings.weekStartDay = Utf8ToWide(StringValue(content, "WeekStartDay", "Monday"));
     settings.monthPaging = BoolValue(content, "MonthPaging", true);
     settings.weatherAutoLocation = BoolValue(content, "WeatherAutoLocation", true);
     settings.taskbarStatus = BoolValue(content, "TaskbarStatus", true);

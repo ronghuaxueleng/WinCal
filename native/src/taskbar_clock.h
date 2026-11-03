@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 #include <string_view>
 #include <string>
+#include <vector>
 
 namespace wincal
 {
@@ -33,13 +34,17 @@ inline bool IsClockAutomationElement(std::wstring_view className, std::wstring_v
     if (IsClockAutomationIdentity(className, id)) return true;
     // Newer Windows 11 builds share OmniButton classes between clock, audio and
     // notifications. Only the clock's accessible name contains today's date.
-    if (className != L"SystemTray.OmniButtonRight" && className != L"SystemTray.OmniButtonLeft")
+    if (className != L"SystemTray.OmniButton" && className != L"SystemTray.OmniButtonRight" &&
+        className != L"SystemTray.OmniButtonLeft")
         return false;
     const auto normalized = NormalizeClockDate(name);
     // The shell keeps the clock label even when a custom template omits dates.
     if (normalized.starts_with(L"时钟") || normalized.starts_with(L"Clock")) return true;
     SYSTEMTIME today{};
     GetLocalTime(&today);
+    wchar_t isoDate[32]{};
+    swprintf_s(isoDate, L"%04u-%02u-%02u", today.wYear, today.wMonth, today.wDay);
+    if (normalized.find(isoDate) != std::wstring::npos) return true;
     for (DWORD format : {DATE_SHORTDATE, DATE_LONGDATE})
     {
         wchar_t date[256]{};
@@ -83,6 +88,63 @@ inline HWND TaskbarAtPoint(POINT point)
     return nullptr;
 }
 
+inline std::vector<RECT> TaskbarClockBounds(HWND taskbarWindow)
+{
+    using Microsoft::WRL::ComPtr;
+    std::vector<RECT> bounds;
+    ComPtr<IUIAutomation> automation;
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&automation)))) return bounds;
+    ComPtr<IUIAutomationElement> taskbar;
+    if (FAILED(automation->ElementFromHandle(taskbarWindow, &taskbar))) return bounds;
+    constexpr PCWSTR classNames[]{L"SystemTray.OmniButton", L"SystemTray.OmniButtonRight",
+                                  L"SystemTray.OmniButtonLeft"};
+    for (const auto className : classNames)
+    {
+        VARIANT value{};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(className);
+        if (!value.bstrVal) continue;
+        ComPtr<IUIAutomationCondition> condition;
+        const HRESULT conditionResult = automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value, &condition);
+        VariantClear(&value);
+        if (FAILED(conditionResult)) continue;
+        ComPtr<IUIAutomationElementArray> descendants;
+        if (FAILED(taskbar->FindAll(TreeScope_Descendants, condition.Get(), &descendants))) continue;
+        int count{};
+        descendants->get_Length(&count);
+        for (int index = 0; index < count; ++index)
+        {
+            ComPtr<IUIAutomationElement> candidate;
+            RECT rect{};
+            if (SUCCEEDED(descendants->GetElement(index, &candidate)) &&
+                SUCCEEDED(candidate->get_CurrentBoundingRectangle(&rect)) &&
+                IsClockAutomationNode(candidate.Get())) bounds.push_back(rect);
+        }
+    }
+    if (!bounds.empty()) return bounds;
+
+    ComPtr<IUIAutomationCondition> allCondition;
+    ComPtr<IUIAutomationElementArray> allDescendants;
+    RECT taskbarBounds{};
+    if (FAILED(automation->CreateTrueCondition(&allCondition)) ||
+        FAILED(taskbar->get_CurrentBoundingRectangle(&taskbarBounds)) ||
+        FAILED(taskbar->FindAll(TreeScope_Descendants, allCondition.Get(), &allDescendants))) return bounds;
+    int fallbackCount{};
+    allDescendants->get_Length(&fallbackCount);
+    for (int index = 0; index < fallbackCount; ++index)
+    {
+        ComPtr<IUIAutomationElement> candidate;
+        RECT rect{};
+        RECT clipped{};
+        if (SUCCEEDED(allDescendants->GetElement(index, &candidate)) &&
+            SUCCEEDED(candidate->get_CurrentBoundingRectangle(&rect)) &&
+            IntersectRect(&clipped, &rect, &taskbarBounds) && IsClockAutomationNode(candidate.Get()))
+            bounds.push_back(clipped);
+    }
+    return bounds;
+}
+
 // Called from the posted UI message, never from the low-level mouse hook.
 inline bool IsTaskbarClockPoint(POINT point)
 {
@@ -96,43 +158,29 @@ inline bool IsTaskbarClockPoint(POINT point)
     }
     using Microsoft::WRL::ComPtr;
     ComPtr<IUIAutomation> automation;
-    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&automation)))) return false;
     ComPtr<IUIAutomationElement> element;
     ComPtr<IUIAutomationTreeWalker> walker;
-    if (FAILED(automation->ElementFromPoint(point, &element)) ||
-        FAILED(automation->get_RawViewWalker(&walker))) return false;
-    for (int depth = 0; element && depth < 16; ++depth)
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&automation))) &&
+        SUCCEEDED(automation->ElementFromPoint(point, &element)) &&
+        SUCCEEDED(automation->get_RawViewWalker(&walker)))
     {
-        if (IsClockAutomationNode(element.Get())) return true;
-        BSTR className{};
-        element->get_CurrentClassName(&className);
-        const bool taskbar = className && (_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
-                                          _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0);
-        SysFreeString(className);
-        if (taskbar) break;
-        ComPtr<IUIAutomationElement> parent;
-        if (FAILED(walker->GetParentElement(element.Get(), &parent))) break;
-        element = std::move(parent);
+        for (int depth = 0; element && depth < 16; ++depth)
+        {
+            if (IsClockAutomationNode(element.Get())) return true;
+            BSTR className{};
+            element->get_CurrentClassName(&className);
+            const bool taskbar = className && (_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+                                              _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0);
+            SysFreeString(className);
+            if (taskbar) break;
+            ComPtr<IUIAutomationElement> parent;
+            if (FAILED(walker->GetParentElement(element.Get(), &parent))) break;
+            element = std::move(parent);
+        }
     }
-    // Some Windows 11 providers return only Shell_TrayWnd from ElementFromPoint.
-    // Resolve the actual clock below that taskbar and use its current bounds.
-    ComPtr<IUIAutomationElement> taskbar;
-    ComPtr<IUIAutomationCondition> condition;
-    ComPtr<IUIAutomationElementArray> descendants;
-    if (FAILED(automation->ElementFromHandle(taskbarWindow, &taskbar)) ||
-        FAILED(automation->CreateTrueCondition(&condition)) ||
-        FAILED(taskbar->FindAll(TreeScope_Descendants, condition.Get(), &descendants))) return false;
-    int count{};
-    descendants->get_Length(&count);
-    for (int index = 0; index < count; ++index)
-    {
-        ComPtr<IUIAutomationElement> candidate;
-        RECT bounds{};
-        if (SUCCEEDED(descendants->GetElement(index, &candidate)) &&
-            SUCCEEDED(candidate->get_CurrentBoundingRectangle(&bounds)) &&
-            PtInRect(&bounds, point) && IsClockAutomationNode(candidate.Get())) return true;
-    }
+    for (const auto& bounds : TaskbarClockBounds(taskbarWindow))
+        if (PtInRect(&bounds, point)) return true;
     return false;
 }
 }

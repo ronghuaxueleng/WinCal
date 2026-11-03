@@ -67,6 +67,13 @@ int main()
                     currentDate, ARRAYSIZE(currentDate), nullptr);
     check(wincal::IsClockAutomationElement(L"SystemTray.OmniButtonRight", L"SystemTrayIcon",
           L"Clock 12:00\n\u200e" + std::wstring{currentDate}), "Windows 11 clock with directional date marks");
+    wchar_t isoDate[32]{};
+    swprintf_s(isoDate, L"%04u-%02u-%02u", today.wYear, today.wMonth, today.wDay);
+    check(wincal::IsClockAutomationElement(L"SystemTray.OmniButton", L"SystemTrayIcon",
+          L"Clock 10:39:02 " + std::wstring{isoDate} + L" Humidity 48%"),
+          "Windows 11 clock on builds using the shared OmniButton class");
+    check(!wincal::IsClockAutomationElement(L"SystemTray.OmniButton", L"SystemTrayIcon", L"Notifications"),
+          "shared OmniButton without a date is not treated as the clock");
     check(!wincal::IsClockAutomationElement(L"SystemTray.OmniButtonRight", L"SystemTrayIcon", L"Notifications") &&
           !wincal::IsClockAutomationElement(L"SystemTray.OmniButtonLeft", L"SystemTrayIcon", L"Volume"),
           "notification and audio buttons are not mistaken for the clock");

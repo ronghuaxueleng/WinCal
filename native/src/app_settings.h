@@ -17,7 +17,7 @@ struct AppSettings
     std::vector<std::wstring> icsAliases;
     int icsRefreshMinutes{30};
     int upcomingDays{3};
-    std::wstring weekStartDay{L"Sunday"};
+    std::wstring weekStartDay{L"Monday"};
     bool monthPaging{true};
     bool weatherAutoLocation{true};
     bool taskbarStatus{true};

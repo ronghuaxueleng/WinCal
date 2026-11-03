@@ -1,6 +1,6 @@
 # WinCal
 
-WinCal 是一个面向 Windows 的轻量日历托盘工具。当前项目主线是原生 Win32/C++ 版本，源码、构建脚本和发布入口都位于 [`native/`](native/)。旧版 WPF 实现已经冻结并归档，不再作为默认开发或发布入口。
+WinCal 是一个面向 Windows 的轻量日历托盘工具。项目主线是原生 Win32/C++ 版本，源码、构建脚本和发布入口都位于 [`native/`](native/)。
 
 ## 功能
 
@@ -22,8 +22,7 @@ native/           原生 Win32/C++ 主工程、构建脚本和测试
 native/src/       日历数据、农历、设置和窗口实现
 native/tests/     原生冒烟测试与设置页离屏检查
 native/resources/ Win32 manifest 和图标资源配置
-archive/wpf/      已冻结的旧版 WPF 工程，仅供历史对照
-Assets/           与两个工程共用的 WinCal.ico
+Assets/           WinCal 图标资源
 ```
 
 ## 环境要求
@@ -85,10 +84,6 @@ cmake --build native/build --config Release --target WinCalSettingsPreview
 
 ## 项目状态
 
-原生 Win32/C++ 已作为主工程使用，WPF 工程已移入 [`archive/wpf/`](archive/wpf/)。当前剩余工作主要是发布前的多显示器、DPI、主题、双数据源和日程详情回归，以及发布目录和版本信息整理。
+原生 Win32/C++ 是当前主工程。当前剩余工作主要是发布前的多显示器、DPI、主题、双数据源和日程详情回归，以及发布目录和版本信息整理。
 
-## 归档工程
-
-旧版 WPF 工程只用于历史对照和必要的数据兼容参考，说明见 [`archive/wpf/README.md`](archive/wpf/README.md)。
-
-任务栏扩展由源码编译的 `WinCalTaskbarClock.dll` 和无界面的 `WinCalTaskbarHost.exe` 提供，使用 Windhawk 引擎 DLL，不启动 Windhawk 管理程序。支持在设置中配置双行格式，详见 [原生项目说明](native/README.md)。
+任务栏扩展由源码编译的 `WinCalTaskbarClock.dll` 和无界面的 `WinCalTaskbarHost.exe` 提供；固定版 Windhawk 引擎随构建产物打包，无需单独下载或安装管理程序。支持在设置中配置双行格式，详见 [原生项目说明](native/README.md)。
