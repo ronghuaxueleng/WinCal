@@ -1,0 +1,188 @@
+{
+  "verified_on": "2026-11-04",
+  "profile": "existing anonymous reference profile",
+  "results": [
+    {
+      "endpoint": "daily-202406",
+      "http_status": 200,
+      "anonymous_member_id": 0,
+      "score_count": 16,
+      "detail_count": 16,
+      "fully_unlocked": false,
+      "member_service_status": false,
+      "days": [
+        {
+          "date": "2026-11-03",
+          "score": 21,
+          "detail_unlocked": true
+        },
+        {
+          "date": "2026-11-04",
+          "score": 34,
+          "detail_unlocked": true
+        },
+        {
+          "date": "2026-11-05",
+          "score": 12,
+          "detail_unlocked": true
+        },
+        {
+          "date": "2026-11-06",
+          "score": 6,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-07",
+          "score": 6,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-08",
+          "score": 6,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-09",
+          "score": 40,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-10",
+          "score": 29,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-11",
+          "score": 32,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-12",
+          "score": 61,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-13",
+          "score": 35,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-14",
+          "score": 35,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-15",
+          "score": 36,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-16",
+          "score": 21,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-17",
+          "score": 70,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-18",
+          "score": 25,
+          "detail_unlocked": false
+        }
+      ]
+    },
+    {
+      "endpoint": "daily-202411-green",
+      "http_status": 200,
+      "anonymous_member_id": 0,
+      "score_count": 16,
+      "detail_count": 16,
+      "fully_unlocked": false,
+      "member_service_status": false,
+      "days": [
+        {
+          "date": "2026-11-03",
+          "score": 21,
+          "detail_unlocked": true
+        },
+        {
+          "date": "2026-11-04",
+          "score": 34,
+          "detail_unlocked": true
+        },
+        {
+          "date": "2026-11-05",
+          "score": 12,
+          "detail_unlocked": true
+        },
+        {
+          "date": "2026-11-06",
+          "score": 6,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-07",
+          "score": 6,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-08",
+          "score": 6,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-09",
+          "score": 40,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-10",
+          "score": 29,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-11",
+          "score": 32,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-12",
+          "score": 61,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-13",
+          "score": 35,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-14",
+          "score": 35,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-15",
+          "score": 36,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-16",
+          "score": 21,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-17",
+          "score": 70,
+          "detail_unlocked": false
+        },
+        {
+          "date": "2026-11-18",
+          "score": 25,
+          "detail_unlocked": false
+        }
+      ]
+    }
+  ]
+}

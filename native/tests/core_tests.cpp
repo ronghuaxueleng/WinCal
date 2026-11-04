@@ -45,10 +45,15 @@ int main()
     syncSettings.taskbarFormat = L"yyyy-mm-dd\\nMD '测试'";
     syncSettings.monthPaging = false;
     syncSettings.weatherUseWttr = true;
+    syncSettings.fortuneBirthday = L"1990-04-24";
+    syncSettings.fortuneBirthTime = L"05:30";
+    syncSettings.fortuneGender = L"Female";
     const auto synced = wincal::SettingsStore::Deserialize(wincal::SettingsStore::Serialize(syncSettings));
     check(synced.themeMode == syncSettings.themeMode && synced.fontSizeOffset == 4 &&
           synced.icsUrls == syncSettings.icsUrls && synced.icsAliases == syncSettings.icsAliases &&
-          synced.taskbarFormat == syncSettings.taskbarFormat && !synced.monthPaging && synced.weatherUseWttr,
+          synced.taskbarFormat == syncSettings.taskbarFormat && !synced.monthPaging && synced.weatherUseWttr &&
+          synced.fortuneBirthday == syncSettings.fortuneBirthday && synced.fortuneBirthTime == syncSettings.fortuneBirthTime &&
+          synced.fortuneGender == syncSettings.fortuneGender,
           "cloud settings round trip preserves Unicode, escaping, and options");
     std::tm shutdownNow{};
     shutdownNow.tm_year = 126;

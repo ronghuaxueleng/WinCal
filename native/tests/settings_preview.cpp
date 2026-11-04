@@ -8,6 +8,9 @@ int wmain(int argc, wchar_t** argv)
     winrt::init_apartment(winrt::apartment_type::single_threaded);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     App app;
+    if (argc == 7 && wcscmp(argv[1], L"--fortune") == 0)
+        return app.RenderFortunePreview(GetModuleHandleW(nullptr), _wtoi(argv[2]), _wtoi(argv[3]) != 0,
+            _wtoi(argv[4]), _wtoi(argv[5]), argv[6]) ? 0 : 1;
     if (argc == 2 && wcscmp(argv[1], L"--check-tools") == 0)
         return app.CheckShutdownTools(GetModuleHandleW(nullptr)) ? 0 : 1;
     if (argc == 5 && (wcscmp(argv[1], L"--weather") == 0 || wcscmp(argv[1], L"--weather-wttr") == 0))

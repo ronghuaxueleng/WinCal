@@ -17,6 +17,10 @@ build_output.txt
 native/build/
 native/out/
 
+## Python
+__pycache__/
+*.pyc
+
 ## Test data
 *.ics
 

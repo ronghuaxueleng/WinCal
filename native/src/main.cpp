@@ -35,6 +35,7 @@
 #include "lunar_calendar.h"
 #include "almanac.h"
 #include "solar_term_readings.h"
+#include "fortune.h"
 #include "startup_setting.h"
 #include "taskbar_clock.h"
 #include "clock_extension.h"
@@ -75,6 +76,10 @@ constexpr UINT kCalendarRefreshTimer = 3;
 constexpr UINT kClockTimer = 4;
 constexpr UINT kShutdownTimer = 6;
 constexpr int kShutdownInput = 2100;
+constexpr int kFortuneInput = 2101;
+constexpr int kShutdownTimeInput = 2102;
+constexpr int kFortuneTimeInput = 2103;
+constexpr int kFortuneGenderInput = 2104;
 constexpr DWORD kEventObjectUncloak = 0x8018;
 constexpr UINT kMenuSettings = 1001;
 constexpr UINT kMenuExit = 1002;
@@ -466,38 +471,56 @@ public:
         return ok;
     }
 
-    // Exercise real input and background timers without dispatching a shutdown.
+    // Verify selection controls only; never start a shutdown timer.
     bool CheckShutdownTools(HINSTANCE instance)
     {
         instance_ = instance;
         if (!RegisterWindowClass() || !CreateMainWindow()) return false;
         ToggleTools();
         OpenShutdownTool();
-        bool ok = toolsOpen_ && IsWindow(toolInput_);
-        SetWindowTextW(toolInput_, L"0");
-        StartShutdownSchedule();
-        ok &= !shutdownDue_;
-        SetWindowTextW(toolInput_, L"30");
-        const auto now = std::time(nullptr);
-        StartShutdownSchedule();
-        ok &= shutdownDue_ && *shutdownDue_ >= now + 1800 && *shutdownDue_ <= std::time(nullptr) + 1800;
-        const auto scheduled = shutdownDue_;
-        HidePopup(HideReason::OutsideClick);
-        ok &= !toolsOpen_ && shutdownDue_ == scheduled;
-        TickShutdownSchedule();
-        ok &= shutdownDue_ == scheduled && !shutdownProcess_;
-        ToggleTools();
-        CancelShutdownSchedule();
-        ok &= !shutdownDue_;
+        bool ok = toolsOpen_ && IsWindow(toolInput_) && IsWindow(toolTimeInput_);
+        ok &= SendMessageW(toolInput_, CB_GETCOUNT, 0, 0) == 15;
+        SendMessageW(toolInput_, CB_SETCURSEL, 4, 0);
+        ok &= ShutdownInputValue() == L"30";
         shutdownAtTime_ = true;
-        SetWindowTextW(toolInput_, L"23:59");
-        StartShutdownSchedule();
-        ok &= shutdownDue_ && *shutdownDue_ > std::time(nullptr);
-        CancelShutdownSchedule();
+        ShowShutdownInputs();
+        SYSTEMTIME time{};
+        GetLocalTime(&time);
+        time.wHour = 8; time.wMinute = 45;
+        DateTime_SetSystemtime(toolTimeInput_, GDT_VALID, &time);
+        ok &= ShutdownInputValue() == L"08:45";
+        shutdownAtTime_ = false;
+        ShowShutdownInputs();
+        ok &= ShutdownInputValue() == L"30";
+        OpenFortuneTool();
+        SYSTEMTIME birth{};
+        birth.wYear = 1990; birth.wMonth = 4; birth.wDay = 24;
+        DateTime_SetSystemtime(fortuneInput_, GDT_VALID, &birth);
+        SYSTEMTIME birthTime{};
+        GetLocalTime(&birthTime);
+        birthTime.wHour = 5; birthTime.wMinute = 30;
+        DateTime_SetSystemtime(fortuneTimeInput_, GDT_VALID, &birthTime);
+        SYSTEMTIME selectedTime{};
+        ok &= DateTime_GetSystemtime(fortuneTimeInput_, &selectedTime) == GDT_VALID;
+        ok &= selectedTime.wHour == 5 && selectedTime.wMinute == 30;
+        SendMessageW(fortuneGenderInput_, CB_SETCURSEL, 2, 0);
+        GenerateFortune();
+        ok &= fortuneChart_ && fortuneChart_->gender == wincal::FortuneGender::Female;
+        OpenShutdownTool();
+        ok &= !IsWindowVisible(fortuneTimeInput_);
+        ok &= !IsWindowVisible(fortuneGenderInput_);
+        OpenFortuneTool();
+        ok &= DateTime_GetSystemtime(fortuneTimeInput_, &selectedTime) == GDT_VALID;
+        ok &= selectedTime.wHour == 5 && selectedTime.wMinute == 30;
+        ok &= SendMessageW(fortuneGenderInput_, CB_GETCURSEL, 0, 0) == 2;
+        ok &= fortuneBirth_ == wincal::ParseFortuneBirthday(L"1990-04-24");
+        SYSTEMTIME range[2]{};
+        ok &= DateTime_GetRange(fortuneInput_, range) == (GDTR_MIN | GDTR_MAX);
+        ok &= range[0].wYear == 1900;
         ok &= !shutdownDue_ && !shutdownProcess_;
         DestroyWindow(window_);
         window_ = nullptr;
-        fwprintf_s(stderr, L"shutdown tools: %s (no shutdown executed)\n", ok ? L"passed" : L"failed");
+        fwprintf_s(stderr, L"tool selection controls: %s (no shutdown timer started)\n", ok ? L"passed" : L"failed");
         return ok;
     }
 
@@ -866,6 +889,47 @@ public:
 
     // Test-only: render calendar frames and verify the month-switch animation
     // settles exactly on the static grid.
+    bool RenderFortunePreview(HINSTANCE instance, int dpi, bool dark, int offset, int selection, const wchar_t* path)
+    {
+        instance_ = instance;
+        dpi_ = toolDpi_ = dpi;
+        dark_ = dark;
+        settings_.fontSizeOffset = offset;
+        fontScale_ = CalendarFontScale(offset);
+        fortuneToolOpen_ = true;
+        fortuneBirth_ = wincal::ParseFortuneBirthday(L"1990-04-24");
+        fortuneChart_ = wincal::BuildFortuneChart(*fortuneBirth_, 330, 0, wincal::FortuneGender::Female);
+        settings_.fortuneBirthTime = L"05:30";
+        settings_.fortuneGender = L"Female";
+        const auto today = Today();
+        fortuneStart_ = std::chrono::sys_days{std::chrono::year{today.year}/static_cast<unsigned>(today.month)/static_cast<unsigned>(today.day)};
+        fortuneSelected_ = std::clamp(selection, 0, 14);
+        const int width = ToolPx(560), height = ToolPx(kLogicalHeight);
+        if (!EnsurePreviewRenderTarget(width, height) || !EnsureDeviceResources()) return false;
+        renderTarget_->BeginDraw();
+        renderTarget_->Clear(GetTheme(dark_).background);
+        renderTarget_->SetTransform(D2D1::Matrix3x2F::Translation(-Scale(20), -Scale(250)));
+        DrawToolPanel(GetTheme(dark_));
+        if (FAILED(renderTarget_->EndDraw()) || FAILED(previewBitmap_->CopyFromRenderTarget(nullptr, previewContext_.Get(), nullptr))) return false;
+        D2D1_MAPPED_RECT mapped{};
+        if (FAILED(previewBitmap_->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+        BITMAPFILEHEADER header{};
+        header.bfType = 0x4d42;
+        header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
+        header.bfSize = header.bfOffBits + width * height * 4;
+        const BITMAPINFOHEADER info{sizeof(BITMAPINFOHEADER), width, -height, 1, 32};
+        HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD written{};
+        bool ok = file != INVALID_HANDLE_VALUE && WriteFile(file, &header, sizeof(header), &written, nullptr) &&
+            WriteFile(file, &info, sizeof(info), &written, nullptr);
+        for (int row = 0; row < height && ok; ++row)
+            ok = WriteFile(file, mapped.bits + row * mapped.pitch, width * 4, &written, nullptr) != FALSE;
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        previewBitmap_->Unmap();
+        fwprintf_s(stderr, L"fortune preview: selection=%d exported=%d\n", fortuneSelected_, ok ? 1 : 0);
+        return ok;
+    }
+
     bool RenderCalendarPreview(HINSTANCE instance, int dpi, bool dark, int dir,
                                int fromYear, int fromMonth, float progress, const wchar_t* path,
                                bool slide = false, bool continuous = false, std::string_view holidayJson = {},
@@ -2218,6 +2282,7 @@ private:
         toolsOpen_ = false;
         if (IsWindow(toolsWindow_)) ShowWindow(toolsWindow_, SW_HIDE);
         if (IsWindow(toolInput_)) ShowWindow(toolInput_, SW_HIDE);
+        if (IsWindow(toolTimeInput_)) ShowWindow(toolTimeInput_, SW_HIDE);
         KillTimer(window_, kClockTimer);
         weatherPanelOpen_ = false;
         if (IsWindow(weatherWindow_)) ShowWindow(weatherWindow_, SW_HIDE);
@@ -2524,6 +2589,16 @@ private:
         RECT toolsRect{};
         if (IsWindowVisible(toolsWindow_) && GetWindowRect(toolsWindow_, &toolsRect) &&
             PtInRect(&toolsRect, mouse.pt)) return false;
+        if (IsWindowVisible(toolsWindow_))
+        {
+            RECT dropdown{};
+            const HWND calendar = IsWindow(fortuneInput_) ? DateTime_GetMonthCal(fortuneInput_) : nullptr;
+            if (IsWindowVisible(calendar) && GetWindowRect(calendar, &dropdown) && PtInRect(&dropdown, mouse.pt)) return false;
+            COMBOBOXINFO combo{sizeof(combo)};
+            for (const HWND choice : {toolInput_, fortuneGenderInput_})
+                if (GetComboBoxInfo(choice, &combo) && IsWindowVisible(combo.hwndList) &&
+                    GetWindowRect(combo.hwndList, &dropdown) && PtInRect(&dropdown, mouse.pt)) return false;
+        }
         RECT weatherRect{};
         if (IsWindowVisible(weatherWindow_) && GetWindowRect(weatherWindow_, &weatherRect) &&
             PtInRect(&weatherRect, mouse.pt)) return false;
@@ -4774,13 +4849,41 @@ private:
 
     void LayoutToolInput()
     {
-        if (!IsWindow(toolInput_)) return;
-        SetWindowPos(toolInput_, nullptr, ToolPx(158), ToolPx(104), ToolPx(330), ToolPx(28),
+        if (!IsWindow(toolInput_) && !IsWindow(fortuneInput_)) return;
+        if (IsWindow(fortuneInput_))
+            SetWindowPos(fortuneInput_, nullptr, ToolPx(144), ToolPx(58), ToolPx(168), ToolPx(30), SWP_NOZORDER | SWP_NOACTIVATE);
+        if (IsWindow(fortuneTimeInput_))
+            SetWindowPos(fortuneTimeInput_, nullptr, ToolPx(332), ToolPx(58), ToolPx(102), ToolPx(30), SWP_NOZORDER | SWP_NOACTIVATE);
+        if (IsWindow(fortuneGenderInput_))
+            SetWindowPos(fortuneGenderInput_, nullptr, ToolPx(382), ToolPx(10), ToolPx(130), ToolPx(140), SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(toolInput_, nullptr, ToolPx(158), ToolPx(102), ToolPx(330), ToolPx(240),
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(toolTimeInput_, nullptr, ToolPx(158), ToolPx(102), ToolPx(330), ToolPx(32),
             SWP_NOZORDER | SWP_NOACTIVATE);
         if (toolInputFont_) DeleteObject(toolInputFont_);
         toolInputFont_ = CreateFontW(-ToolPx(17), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
         SendMessageW(toolInput_, WM_SETFONT, reinterpret_cast<WPARAM>(toolInputFont_), TRUE);
+        SendMessageW(fortuneInput_, WM_SETFONT, reinterpret_cast<WPARAM>(toolInputFont_), TRUE);
+        SendMessageW(fortuneTimeInput_, WM_SETFONT, reinterpret_cast<WPARAM>(toolInputFont_), TRUE);
+        SendMessageW(fortuneGenderInput_, WM_SETFONT, reinterpret_cast<WPARAM>(toolInputFont_), TRUE);
+        SendMessageW(toolTimeInput_, WM_SETFONT, reinterpret_cast<WPARAM>(toolInputFont_), TRUE);
+    }
+
+    void ShowShutdownInputs()
+    {
+        ShowWindow(toolInput_, shutdownToolOpen_ && !shutdownAtTime_ ? SW_SHOW : SW_HIDE);
+        ShowWindow(toolTimeInput_, shutdownToolOpen_ && shutdownAtTime_ ? SW_SHOW : SW_HIDE);
+    }
+
+    std::wstring ShutdownInputValue() const
+    {
+        if (!shutdownAtTime_) return ReadControlText(toolInput_);
+        SYSTEMTIME time{};
+        if (DateTime_GetSystemtime(toolTimeInput_, &time) != GDT_VALID) return {};
+        wchar_t value[6]{};
+        swprintf_s(value, L"%02u:%02u", time.wHour, time.wMinute);
+        return value;
     }
 
     void PositionTools()
@@ -4803,18 +4906,335 @@ private:
 
     void OpenShutdownTool()
     {
+        fortuneToolOpen_ = false;
+        if (IsWindow(fortuneInput_)) ShowWindow(fortuneInput_, SW_HIDE);
+        if (IsWindow(fortuneTimeInput_)) ShowWindow(fortuneTimeInput_, SW_HIDE);
+        if (IsWindow(fortuneGenderInput_)) ShowWindow(fortuneGenderInput_, SW_HIDE);
         shutdownToolOpen_ = true;
         if (!IsWindow(toolInput_))
         {
-            toolInput_ = CreateWindowExW(0, L"EDIT", L"30", WS_CHILD | ES_AUTOHSCROLL | WS_TABSTOP,
+            toolInput_ = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP,
                 0, 0, 0, 0, toolsWindow_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShutdownInput)), instance_, nullptr);
-            SendMessageW(toolInput_, EM_SETLIMITTEXT, 5, 0);
+            for (const auto minutes : {1, 5, 10, 15, 30, 45, 60, 90, 120, 180, 240, 480, 720, 1440, 10080})
+            {
+                const auto label = std::to_wstring(minutes);
+                SendMessageW(toolInput_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+            }
+            SendMessageW(toolInput_, CB_LIMITTEXT, 5, 0);
+            SetWindowTextW(toolInput_, L"30");
             SetWindowSubclass(toolInput_, ToolInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
+            COMBOBOXINFO combo{sizeof(combo)};
+            if (GetComboBoxInfo(toolInput_, &combo))
+                SetWindowSubclass(combo.hwndItem, ToolInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
+            INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_DATE_CLASSES};
+            InitCommonControlsEx(&controls);
+            toolTimeInput_ = CreateWindowExW(0, DATETIMEPICK_CLASSW, L"", WS_CHILD | WS_TABSTOP | DTS_TIMEFORMAT,
+                0, 0, 0, 0, toolsWindow_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShutdownTimeInput)), instance_, nullptr);
+            SendMessageW(toolTimeInput_, DTM_SETFORMATW, 0, reinterpret_cast<LPARAM>(L"HH':'mm"));
+            SYSTEMTIME time{};
+            GetLocalTime(&time);
+            time.wHour = 23; time.wMinute = 30; time.wSecond = 0;
+            DateTime_SetSystemtime(toolTimeInput_, GDT_VALID, &time);
+            SetWindowSubclass(toolTimeInput_, ToolInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
         }
         LayoutToolInput();
-        ShowWindow(toolInput_, SW_SHOW);
-        SetFocus(toolInput_);
+        ShowShutdownInputs();
+        SetFocus(shutdownAtTime_ ? toolTimeInput_ : toolInput_);
         InvalidateRect(toolsWindow_, nullptr, FALSE);
+    }
+
+    static LRESULT CALLBACK FortuneInputProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
+                                             UINT_PTR, DWORD_PTR data)
+    {
+        auto* app = reinterpret_cast<App*>(data);
+        if (message == WM_KEYDOWN && wParam == VK_ESCAPE && !DateTime_GetMonthCal(window)) { app->BackFromTool(); return 0; }
+        if (message == WM_KEYDOWN && wParam == VK_RETURN) { app->GenerateFortune(); return 0; }
+        if (message == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE)) return 0;
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
+    void OpenFortuneTool()
+    {
+        shutdownToolOpen_ = false;
+        if (IsWindow(toolInput_)) ShowWindow(toolInput_, SW_HIDE);
+        if (IsWindow(toolTimeInput_)) ShowWindow(toolTimeInput_, SW_HIDE);
+        fortuneToolOpen_ = true;
+        if (!IsWindow(fortuneInput_))
+        {
+            INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_DATE_CLASSES};
+            InitCommonControlsEx(&controls);
+            fortuneInput_ = CreateWindowExW(0, DATETIMEPICK_CLASSW, L"",
+                WS_CHILD | WS_TABSTOP | DTS_SHOWNONE | DTS_SHORTDATEFORMAT, 0, 0, 0, 0, toolsWindow_,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFortuneInput)), instance_, nullptr);
+            SendMessageW(fortuneInput_, DTM_SETFORMATW, 0, reinterpret_cast<LPARAM>(L"yyyy'-'MM'-'dd"));
+            SYSTEMTIME birth{};
+            if (const auto saved = wincal::ParseFortuneBirthday(settings_.fortuneBirthday))
+            {
+                const std::chrono::year_month_day date{*saved};
+                birth.wYear = static_cast<WORD>(static_cast<int>(date.year()));
+                birth.wMonth = static_cast<WORD>(static_cast<unsigned>(date.month()));
+                birth.wDay = static_cast<WORD>(static_cast<unsigned>(date.day()));
+                DateTime_SetSystemtime(fortuneInput_, GDT_VALID, &birth);
+            }
+            else DateTime_SetSystemtime(fortuneInput_, GDT_NONE, &birth);
+            SetWindowSubclass(fortuneInput_, FortuneInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
+            fortuneTimeInput_ = CreateWindowExW(0, DATETIMEPICK_CLASSW, L"", WS_CHILD | WS_TABSTOP | DTS_TIMEFORMAT | DTS_SHOWNONE,
+                0, 0, 0, 0, toolsWindow_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFortuneTimeInput)), instance_, nullptr);
+            SendMessageW(fortuneTimeInput_, DTM_SETFORMATW, 0, reinterpret_cast<LPARAM>(L"HH':'mm"));
+            SYSTEMTIME time{};
+            GetLocalTime(&time);
+            const auto& savedTime = settings_.fortuneBirthTime;
+            if (savedTime.size() == 5 && savedTime[2] == L':' &&
+                savedTime[0] >= L'0' && savedTime[0] <= L'2' && savedTime[1] >= L'0' && savedTime[1] <= L'9' &&
+                savedTime[3] >= L'0' && savedTime[3] <= L'5' && savedTime[4] >= L'0' && savedTime[4] <= L'9' &&
+                (savedTime[0] - L'0') * 10 + savedTime[1] - L'0' < 24)
+            {
+                time.wHour = static_cast<WORD>((savedTime[0] - L'0') * 10 + savedTime[1] - L'0');
+                time.wMinute = static_cast<WORD>((savedTime[3] - L'0') * 10 + savedTime[4] - L'0');
+                DateTime_SetSystemtime(fortuneTimeInput_, GDT_VALID, &time);
+            }
+            else DateTime_SetSystemtime(fortuneTimeInput_, GDT_NONE, &time);
+            SetWindowSubclass(fortuneTimeInput_, FortuneInputProc, 1, reinterpret_cast<DWORD_PTR>(this));
+            fortuneGenderInput_ = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
+                0, 0, 0, 0, toolsWindow_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFortuneGenderInput)), instance_, nullptr);
+            for (const auto label : {L"性别未填", L"男", L"女"})
+                SendMessageW(fortuneGenderInput_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+            SendMessageW(fortuneGenderInput_, CB_SETCURSEL,
+                settings_.fortuneGender == L"Male" ? 1 : settings_.fortuneGender == L"Female" ? 2 : 0, 0);
+        }
+        SYSTEMTIME range[2]{};
+        range[0].wYear = 1900; range[0].wMonth = 1; range[0].wDay = 1;
+        GetLocalTime(&range[1]);
+        DateTime_SetRange(fortuneInput_, GDTR_MIN | GDTR_MAX, range);
+        LayoutToolInput();
+        ShowWindow(fortuneInput_, SW_SHOW);
+        ShowWindow(fortuneTimeInput_, SW_SHOW);
+        ShowWindow(fortuneGenderInput_, SW_SHOW);
+        SetFocus(fortuneInput_);
+        GenerateFortune();
+        InvalidateRect(toolsWindow_, nullptr, FALSE);
+    }
+
+    void GenerateFortune()
+    {
+        SYSTEMTIME date{};
+        wchar_t value[11]{};
+        if (DateTime_GetSystemtime(fortuneInput_, &date) == GDT_VALID)
+            swprintf_s(value, L"%04u-%02u-%02u", date.wYear, date.wMonth, date.wDay);
+        SYSTEMTIME birthTime{};
+        wchar_t timeValue[6]{};
+        if (DateTime_GetSystemtime(fortuneTimeInput_, &birthTime) == GDT_VALID)
+            swprintf_s(timeValue, L"%02u:%02u", birthTime.wHour, birthTime.wMinute);
+        const auto birth = wincal::ParseFortuneBirthday(value);
+        const auto selection = SendMessageW(fortuneGenderInput_, CB_GETCURSEL, 0, 0);
+        const std::wstring genderValue = selection == 1 ? L"Male" : selection == 2 ? L"Female" : L"Unknown";
+        const auto gender = selection == 1 ? wincal::FortuneGender::Male : selection == 2 ?
+            wincal::FortuneGender::Female : wincal::FortuneGender::Unknown;
+        const auto today = Today();
+        const auto start = std::chrono::sys_days{std::chrono::year{today.year}/static_cast<unsigned>(today.month)/static_cast<unsigned>(today.day)};
+        if (!birth || *birth > start)
+        {
+            fortuneStatus_ = L"请选择公历生日，不能晚于今天。";
+            fortuneBirth_.reset();
+            fortuneChart_.reset();
+        }
+        else
+        {
+            fortuneBirth_ = birth;
+            fortuneChart_ = wincal::BuildFortuneChart(*birth, wincal::ParseFortuneTime(timeValue), 0, gender);
+            fortuneStart_ = start;
+            fortuneSelected_ = 0;
+            fortuneStatus_.clear();
+#ifndef WINCAL_SETTINGS_PREVIEW
+            if (settings_.fortuneBirthday != value || settings_.fortuneBirthTime != timeValue || settings_.fortuneGender != genderValue)
+            {
+                auto saved = wincal::SettingsStore::Load();
+                saved.fortuneBirthday = value;
+                saved.fortuneBirthTime = timeValue;
+                saved.fortuneGender = genderValue;
+                if (wincal::SettingsStore::Save(saved))
+                {
+                    settings_.fortuneBirthday = value;
+                    settingsDraft_.fortuneBirthday = value;
+                    settings_.fortuneBirthTime = timeValue;
+                    settingsDraft_.fortuneBirthTime = timeValue;
+                    settings_.fortuneGender = genderValue;
+                    settingsDraft_.fortuneGender = genderValue;
+                }
+                else fortuneStatus_ = L"本次结果已生成，生日保存失败。";
+            }
+#endif
+        }
+        InvalidateRect(toolsWindow_, nullptr, FALSE);
+    }
+
+    void DrawFortunePanel(const Theme& theme)
+    {
+        ComPtr<IDWriteTextFormat> normal, captionFormat, large;
+        const auto create = [&](float size, IDWriteTextFormat** format)
+        {
+            return writeFactory_->CreateTextFormat(kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, Scale(size), L"zh-CN", format);
+        };
+        if (FAILED(create(14, normal.GetAddressOf())) || FAILED(create(12, captionFormat.GetAddressOf())) ||
+            FAILED(create(36, large.GetAddressOf()))) return;
+        const auto text = [&](const std::wstring& value, IDWriteTextFormat* font, float left, float top, float right, float bottom,
+                              D2D1_COLOR_F color)
+        {
+            DrawText(value.c_str(), font, {Scale(left), Scale(top), Scale(right), Scale(bottom)}, color);
+        };
+        const auto card = [&](float left, float top, float right, float bottom, D2D1_COLOR_F color)
+        {
+            const auto brush = Brush(color);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(
+                {Scale(left), Scale(top), Scale(right), Scale(bottom)}, Scale(10), Scale(10)), brush.Get());
+        };
+        text(L"运势 · 出生日期 / 时间", normal.Get(), 140, 12, 372, 40, theme.primary);
+        if (!IsWindow(fortuneGenderInput_))
+        {
+            card(382, 8, 512, 38, theme.hover);
+            text(settings_.fortuneGender == L"Male" ? L"性别：男" : settings_.fortuneGender == L"Female" ? L"性别：女" : L"性别未填",
+                normal.Get(), 390, 12, 510, 40, theme.primary);
+        }
+        card(138, 50, 318, 94, theme.hover);
+        card(326, 50, 440, 94, theme.hover);
+        if (!IsWindow(fortuneInput_))
+        {
+            std::wstring profile = L"出生日期";
+            if (fortuneBirth_)
+            {
+                const std::chrono::year_month_day born{*fortuneBirth_};
+                wchar_t value[16]{};
+                swprintf_s(value, L"%04d-%02u-%02u", static_cast<int>(born.year()),
+                    static_cast<unsigned>(born.month()), static_cast<unsigned>(born.day()));
+                profile = value;
+            }
+            text(profile, normal.Get(), 144, 61, 312, 90, theme.primary);
+        }
+        if (!IsWindow(fortuneTimeInput_))
+            text(settings_.fortuneBirthTime.empty() ? L"出生时间" : settings_.fortuneBirthTime,
+                normal.Get(), 332, 61, 434, 90, theme.primary);
+        card(448, 50, 538, 94, theme.accent);
+        text(L"更新", normal.Get(), 474, 61, 536, 89, D2D1::ColorF(0xFFFFFF));
+        if (!fortuneChart_)
+        {
+            text(fortuneStatus_.empty() ? L"输入公历出生日期，查看当天评分及未来 15 天走势。" : fortuneStatus_,
+                normal.Get(), 146, 120, 526, 204, theme.primary);
+            text(L"四柱流日规则 v3\n结合月令旺衰、通根透干，分层计算大运、流年、流月与流日。\n\n出生时间留空时省略时柱。大运需填写时间和性别。\n生辰与性别随配置同步至坚果云。",
+                normal.Get(), 146, 224, 526, 456, theme.secondary);
+            return;
+        }
+        std::array<wincal::FortuneDay, 15> scores;
+        for (int i = 0; i < 15; ++i) scores[i] = wincal::FortuneForDate(*fortuneChart_, fortuneStart_ + std::chrono::days{i});
+        const auto& selected = scores[fortuneSelected_];
+        const std::chrono::year_month_day date{fortuneStart_ + std::chrono::days{fortuneSelected_}};
+        const auto stamp = std::to_wstring(static_cast<unsigned>(date.month())) + L"月" +
+            std::to_wstring(static_cast<unsigned>(date.day())) + L"日";
+        const auto scoreColor = selected.overall >= 75 ? D2D1::ColorF(0x25B598) : selected.overall >= 55 ?
+            theme.accent : D2D1::ColorF(dark_ ? 0xF6BE76 : 0xB87527);
+        card(138, 106, 538, 200, theme.card);
+        text(std::to_wstring(selected.overall), large.Get(), 154, 112, 234, 170, scoreColor);
+        text(stamp + (fortuneSelected_ == 0 ? L" · 今天" : L""), normal.Get(), 246, 120, 520, 146, theme.primary);
+        text(std::wstring{wincal::FortuneLabel(selected.overall)}, normal.Get(), 246, 150, 520, 178, scoreColor);
+        text(L"综合评分 / 100", captionFormat.Get(), 154, 174, 330, 196, theme.secondary);
+        constexpr const wchar_t* labels[]{L"人际", L"行动", L"节奏"};
+        const int values[]{selected.social, selected.work, selected.vitality};
+        for (int i = 0; i < 3; ++i)
+        {
+            const float x = 146.0f + i * 132;
+            text(std::wstring{labels[i]} + L" " + std::to_wstring(values[i]), normal.Get(), x, 208, x + 120, 235, theme.secondary);
+            card(x, 239, x + 112, 244, theme.hover);
+            card(x, 239, x + 112 * values[i] / 100, 244, scoreColor);
+        }
+        text(L"未来 15 天 · 点击曲线节点切换", captionFormat.Get(), 146, 260, 530, 284, theme.secondary);
+        card(138, 288, 538, 446, theme.card);
+        const auto xy = [&](int i)
+        {
+            return D2D1::Point2F(Scale(158 + i * 26.0f), Scale(414 - scores[i].overall * 1.08f));
+        };
+        ComPtr<ID2D1PathGeometry> area;
+        ComPtr<ID2D1GeometrySink> areaSink;
+        if (SUCCEEDED(factory_->CreatePathGeometry(&area)) && SUCCEEDED(area->Open(&areaSink)))
+        {
+            areaSink->BeginFigure({Scale(158), Scale(414)}, D2D1_FIGURE_BEGIN_FILLED);
+            areaSink->AddLine(xy(0));
+            for (int i = 1; i < 15; ++i)
+            {
+                const auto a = xy(i - 1), b = xy(i);
+                const float middle = (a.x + b.x) / 2;
+                areaSink->AddBezier(D2D1::BezierSegment({middle, a.y}, {middle, b.y}, b));
+            }
+            areaSink->AddLine({Scale(522), Scale(414)});
+            areaSink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            areaSink->Close();
+            const D2D1_GRADIENT_STOP stops[]{{0, D2D1::ColorF(0xE6A44F, 0.3f)}, {1, D2D1::ColorF(0xE6A44F, 0.02f)}};
+            ComPtr<ID2D1GradientStopCollection> collection;
+            ComPtr<ID2D1LinearGradientBrush> gradient;
+            if (SUCCEEDED(renderTarget_->CreateGradientStopCollection(stops, 2, &collection)) &&
+                SUCCEEDED(renderTarget_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties({Scale(158), Scale(306)}, {Scale(158), Scale(414)}), collection.Get(), &gradient)))
+                renderTarget_->FillGeometry(area.Get(), gradient.Get());
+        }
+        const auto grid = Brush(theme.separator);
+        for (int value : {0, 50, 100})
+        {
+            const float y = Scale(414 - value * 1.08f);
+            renderTarget_->DrawLine({Scale(150), y}, {Scale(526), y}, grid.Get(), Scale(0.7f));
+        }
+        ComPtr<ID2D1PathGeometry> curve;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (SUCCEEDED(factory_->CreatePathGeometry(&curve)) && SUCCEEDED(curve->Open(&sink)))
+        {
+            sink->BeginFigure(xy(0), D2D1_FIGURE_BEGIN_HOLLOW);
+            for (int i = 1; i < 15; ++i)
+            {
+                const auto a = xy(i - 1), b = xy(i);
+                const float middle = (a.x + b.x) / 2;
+                sink->AddBezier(D2D1::BezierSegment({middle, a.y}, {middle, b.y}, b));
+            }
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            sink->Close();
+            const auto line = Brush(D2D1::ColorF(dark_ ? 0xF5BC76 : 0xD8913E));
+            renderTarget_->DrawGeometry(curve.Get(), line.Get(), Scale(2.2f));
+        }
+        const auto marker = Brush(scoreColor), surface = Brush(theme.card);
+        const auto nodeOutline = Brush(D2D1::ColorF(dark_ ? 0xF5BC76 : 0xD8913E));
+        const auto position = xy(fortuneSelected_);
+        renderTarget_->DrawLine({position.x, Scale(298)}, {position.x, Scale(414)}, marker.Get(), Scale(1));
+        for (int i = 0; i < 15; ++i)
+        {
+            renderTarget_->FillEllipse(D2D1::Ellipse(xy(i), Scale(i == fortuneSelected_ ? 5.0f : 2.4f),
+                Scale(i == fortuneSelected_ ? 5.0f : 2.4f)), i == fortuneSelected_ ? marker.Get() : surface.Get());
+            if (i != fortuneSelected_)
+                renderTarget_->DrawEllipse(D2D1::Ellipse(xy(i), Scale(2.4f), Scale(2.4f)), nodeOutline.Get(), Scale(1));
+            if (i == 0 || i == 7 || i == 14)
+            {
+                const std::chrono::year_month_day d{fortuneStart_ + std::chrono::days{i}};
+                captionFormat->SetTextAlignment(i == 14 ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING);
+                const float left = i == 14 ? 476.0f : 146 + i * 26.0f;
+                text(std::to_wstring(static_cast<unsigned>(d.month())) + L"/" + std::to_wstring(static_cast<unsigned>(d.day())),
+                    captionFormat.Get(), left, 420, i == 14 ? 528.0f : left + 65, 442, theme.secondary);
+                captionFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            }
+        }
+        const auto low = static_cast<int>(std::min_element(scores.begin(), scores.end(), [](const auto& a, const auto& b) { return a.overall < b.overall; }) - scores.begin());
+        const auto high = static_cast<int>(std::max_element(scores.begin(), scores.end(), [](const auto& a, const auto& b) { return a.overall < b.overall; }) - scores.begin());
+        for (const int index : {low, high})
+        {
+            const auto point = xy(index);
+            const auto left = std::clamp(158 + index * 26.0f - 18, 146.0f, 498.0f);
+            text(std::to_wstring(scores[index].overall), captionFormat.Get(), left,
+                point.y / Scale(1) - 22, left + 40, point.y / Scale(1) - 2, theme.secondary);
+        }
+        text(L"当日提示 · " + stamp, normal.Get(), 146, 456, 530, 480, theme.primary);
+        text(wincal::FortuneAdvice(selected), captionFormat.Get(), 146, 484, 532, 532, theme.secondary);
+        const auto signedValue = [](int value) { return (value >= 0 ? L"+" : L"") + std::to_wstring(value); };
+        text(fortuneChart_->Text() + L" · " + (fortuneChart_->strength > 0 ? L"偏强" : fortuneChart_->strength < 0 ? L"偏弱" : L"中和") +
+            L"\n运 " + signedValue(selected.luckBonus) + L" · 年 " + signedValue(selected.yearBonus) + L" · 月 " + signedValue(selected.monthBonus) +
+            L" · 日支 " + signedValue(selected.branchBonus) + L"（点击依据）", captionFormat.Get(), 146, 536, 532, 578, theme.secondary);
+        text(fortuneStatus_.empty() ? (fortuneChart_->gender == wincal::FortuneGender::Unknown ? L"未填性别，未计大运 · 北京时间 · 娱乐参考" :
+            !fortuneChart_->hasTime ? L"未填时间，未计大运 · 北京时间 · 娱乐参考" : L"月令与运年月日规则 v3 · 北京时间 · 娱乐参考") : fortuneStatus_,
+            captionFormat.Get(), 146, 582, 532, 608, theme.muted);
     }
 
     void ToggleTools()
@@ -4825,6 +5245,7 @@ private:
             CloseWeatherForecast();
             CloseDetailWindow();
             shutdownToolOpen_ = false;
+            fortuneToolOpen_ = false;
             if (!IsWindow(toolsWindow_))
             {
                 WNDCLASSW wc{};
@@ -4843,6 +5264,10 @@ private:
             DwmSetWindowAttribute(toolsWindow_, 33, &corner, sizeof(corner));
         }
         if (IsWindow(toolInput_)) ShowWindow(toolInput_, SW_HIDE);
+        if (IsWindow(toolTimeInput_)) ShowWindow(toolTimeInput_, SW_HIDE);
+        if (IsWindow(fortuneInput_)) ShowWindow(fortuneInput_, SW_HIDE);
+        if (IsWindow(fortuneTimeInput_)) ShowWindow(fortuneTimeInput_, SW_HIDE);
+        if (IsWindow(fortuneGenderInput_)) ShowWindow(fortuneGenderInput_, SW_HIDE);
         ShowWindow(toolsWindow_, toolsOpen_ ? SW_SHOW : SW_HIDE);
         SetFocus(toolsOpen_ ? toolsWindow_ : window_);
         PresentAgenda();
@@ -4877,6 +5302,15 @@ private:
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC:
             return HandleMessage(message, wParam, lParam);
+        case WM_NOTIFY:
+            if (reinterpret_cast<NMHDR*>(lParam)->hwndFrom == fortuneInput_ &&
+                reinterpret_cast<NMHDR*>(lParam)->code == DTN_DROPDOWN)
+            {
+                KillTimer(window_, kOutsideClickTimer);
+                const HWND calendar = DateTime_GetMonthCal(fortuneInput_);
+                MonthCal_SetFirstDayOfWeek(calendar, 0);
+            }
+            break;
         case WM_CLOSE:
             if (toolsOpen_) ToggleTools();
             return 0;
@@ -4901,13 +5335,37 @@ private:
                 OpenShutdownTool();
                 return 0;
             }
+            if (localX >= 16 && localX < 100 && localY >= 150 && localY < 238)
+            {
+                OpenFortuneTool();
+                return 0;
+            }
+            if (fortuneToolOpen_)
+            {
+                if (localX >= 448 && localX < 538 && localY >= 50 && localY < 94) GenerateFortune();
+                else if (localX >= 140 && localX <= 538 && localY >= 536 && localY < 580)
+                {
+                    if (fortuneChart_)
+                    {
+                        const auto selected = wincal::FortuneForDate(*fortuneChart_, fortuneStart_ + std::chrono::days{fortuneSelected_});
+                        MessageBoxW(window, wincal::FortuneRuleDetails(*fortuneChart_, selected).c_str(),
+                            L"四柱流日评分依据 v3", MB_OK | MB_ICONINFORMATION);
+                    }
+                }
+                else if (fortuneBirth_ && localX >= 150 && localX <= 530 && localY >= 288 && localY <= 432)
+                {
+                    fortuneSelected_ = std::clamp(static_cast<int>(std::lround((localX - 158) * 14.0 / 364)), 0, 14);
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
+            }
             if (!shutdownToolOpen_ || localX < 130 || localX >= 520) return 0;
             const int x = localX - 110;
             const int y = localY + 250;
             if (y >= 300 && y < 334 && !shutdownDue_)
             {
                 shutdownAtTime_ = x >= 215;
-                SetWindowTextW(toolInput_, shutdownAtTime_ ? L"23:30" : L"30");
+                ShowShutdownInputs();
                 toolStatus_.clear();
             }
             else if (y >= 446 && y < 480)
@@ -4922,6 +5380,10 @@ private:
             toolsRenderTarget_.Reset();
             toolsWindow_ = nullptr;
             toolInput_ = nullptr;
+            toolTimeInput_ = nullptr;
+            fortuneInput_ = nullptr;
+            fortuneTimeInput_ = nullptr;
+            fortuneGenderInput_ = nullptr;
             break;
         }
         return DefWindowProcW(window, message, wParam, lParam);
@@ -4929,9 +5391,14 @@ private:
 
     void BackFromTool()
     {
-        if (!shutdownToolOpen_) { ToggleTools(); return; }
+        if (!shutdownToolOpen_ && !fortuneToolOpen_) { ToggleTools(); return; }
         shutdownToolOpen_ = false;
+        fortuneToolOpen_ = false;
+        if (IsWindow(fortuneInput_)) ShowWindow(fortuneInput_, SW_HIDE);
+        if (IsWindow(fortuneTimeInput_)) ShowWindow(fortuneTimeInput_, SW_HIDE);
+        if (IsWindow(fortuneGenderInput_)) ShowWindow(fortuneGenderInput_, SW_HIDE);
         ShowWindow(toolInput_, SW_HIDE);
+        ShowWindow(toolTimeInput_, SW_HIDE);
         SetFocus(toolsWindow_);
         InvalidateRect(toolsWindow_, nullptr, FALSE);
     }
@@ -4963,8 +5430,14 @@ private:
                                           UINT_PTR, DWORD_PTR data)
     {
         auto* app = reinterpret_cast<App*>(data);
-        if (message == WM_KEYDOWN && wParam == VK_ESCAPE) { app->BackFromTool(); return 0; }
-        if (message == WM_KEYDOWN && wParam == VK_RETURN) { app->StartShutdownSchedule(); return 0; }
+        if (message == WM_KEYDOWN && wParam == VK_ESCAPE)
+        {
+            if (SendMessageW(app->toolInput_, CB_GETDROPPEDSTATE, 0, 0))
+                SendMessageW(app->toolInput_, CB_SHOWDROPDOWN, FALSE, 0);
+            else app->BackFromTool();
+            return 0;
+        }
+        // Only the explicit start button arms a shutdown.
         return DefSubclassProc(window, message, wParam, lParam);
     }
 
@@ -4972,7 +5445,7 @@ private:
     {
         if (shutdownDue_) return;
         if (shutdownProcess_) return;
-        const auto due = wincal::ShutdownDeadline(ReadControlText(toolInput_), shutdownAtTime_, std::time(nullptr));
+        const auto due = wincal::ShutdownDeadline(ShutdownInputValue(), shutdownAtTime_, std::time(nullptr));
         if (!due)
         {
             toolStatus_ = shutdownAtTime_ ? L"请输入有效时刻，例如 23:30。" : L"请输入 1～10080 分钟。";
@@ -4983,7 +5456,8 @@ private:
         {
             shutdownDue_ = due;
             toolStatus_.clear();
-            SendMessageW(toolInput_, EM_SETREADONLY, TRUE, 0);
+            EnableWindow(toolInput_, FALSE);
+            EnableWindow(toolTimeInput_, FALSE);
         }
         if (IsWindow(toolsWindow_)) InvalidateRect(toolsWindow_, nullptr, FALSE);
         InvalidateRect(window_, nullptr, FALSE);
@@ -4993,7 +5467,8 @@ private:
     {
         shutdownDue_.reset();
         KillTimer(window_, kShutdownTimer);
-        SendMessageW(toolInput_, EM_SETREADONLY, FALSE, 0);
+        EnableWindow(toolInput_, TRUE);
+        EnableWindow(toolTimeInput_, TRUE);
         toolStatus_ = L"定时关机已取消。";
         if (IsWindow(toolsWindow_)) InvalidateRect(toolsWindow_, nullptr, FALSE);
         InvalidateRect(window_, nullptr, FALSE);
@@ -5005,7 +5480,8 @@ private:
         if (std::time(nullptr) >= *shutdownDue_)
         {
             shutdownDue_.reset();
-            SendMessageW(toolInput_, EM_SETREADONLY, FALSE, 0);
+            EnableWindow(toolInput_, TRUE);
+            EnableWindow(toolTimeInput_, TRUE);
             wchar_t systemDir[MAX_PATH]{};
             GetSystemDirectoryW(systemDir, ARRAYSIZE(systemDir));
             const auto executable = std::wstring{systemDir} + L"\\shutdown.exe";
@@ -5086,10 +5562,26 @@ private:
                 {Scale(36), Scale(350), Scale(120), Scale(378)}, theme.primary);
             if (shutdownDue_)
                 renderTarget_->FillEllipse(D2D1::Ellipse({Scale(100), Scale(310)}, Scale(3), Scale(3)), ink.Get());
+            if (fortuneToolOpen_)
+            {
+                const auto selected = Brush(theme.hover);
+                renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(
+                    {Scale(36), Scale(400), Scale(120), Scale(488)}, Scale(8), Scale(8)), selected.Get());
+            }
+            renderTarget_->DrawLine({Scale(54), Scale(440)}, {Scale(70), Scale(420)}, ink.Get(), Scale(2));
+            renderTarget_->DrawLine({Scale(70), Scale(420)}, {Scale(84), Scale(431)}, ink.Get(), Scale(2));
+            renderTarget_->DrawLine({Scale(84), Scale(431)}, {Scale(103), Scale(410)}, ink.Get(), Scale(2));
+            DrawText(L"运势", bodyFormat_.Get(), {Scale(36), Scale(450), Scale(120), Scale(478)}, theme.primary);
         }
         const auto divider = Brush(theme.separator);
         renderTarget_->DrawLine({Scale(138), Scale(266)}, {Scale(138), Scale(kLogicalHeight + 234)},
             divider.Get(), Scale(1));
+        if (fortuneToolOpen_)
+        {
+            renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
+            DrawFortunePanel(theme);
+            return;
+        }
         renderTarget_->SetTransform(D2D1::Matrix3x2F::Translation(Scale(110), -Scale(250)));
         if (!shutdownToolOpen_)
         {
@@ -5110,7 +5602,7 @@ private:
         if (!IsWindow(toolInput_))
             DrawText(shutdownAtTime_ ? L"23:30" : L"30", bodyFormat_.Get(), input, theme.primary);
         std::wstring status = toolStatus_.empty() ?
-            (shutdownAtTime_ ? L"24 小时制 HH:mm；已过的时刻安排在明天。" : L"输入分钟数，支持 1 分钟至 7 天。") : toolStatus_;
+            (shutdownAtTime_ ? L"选择小时和分钟；已过的时刻安排在明天。" : L"选择或输入分钟数，支持 1 分钟至 7 天。") : toolStatus_;
         if (shutdownDue_)
         {
             std::tm local{};
@@ -5263,7 +5755,7 @@ private:
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC:
         {
-            if (reinterpret_cast<HWND>(lParam) != toolInput_) break;
+            if (reinterpret_cast<HWND>(lParam) != toolInput_ && reinterpret_cast<HWND>(lParam) != fortuneInput_) break;
             const auto theme = GetTheme(dark_);
             const auto color = [](D2D1_COLOR_F c) { return RGB(static_cast<int>(c.r * 255),
                 static_cast<int>(c.g * 255), static_cast<int>(c.b * 255)); };
@@ -5665,10 +6157,20 @@ private:
     HWND toolsWindow_{};
     UINT toolDpi_{96};
     bool shutdownToolOpen_{};
+    bool fortuneToolOpen_{};
+    HWND fortuneInput_{};
+    HWND fortuneTimeInput_{};
+    HWND fortuneGenderInput_{};
+    std::optional<std::chrono::sys_days> fortuneBirth_;
+    std::optional<wincal::FortuneChart> fortuneChart_;
+    std::chrono::sys_days fortuneStart_{};
+    int fortuneSelected_{};
+    std::wstring fortuneStatus_;
     ComPtr<ID2D1HwndRenderTarget> toolsRenderTarget_;
     bool toolsOpen_{};
     bool shutdownAtTime_{};
     HWND toolInput_{};
+    HWND toolTimeInput_{};
     HFONT toolInputFont_{};
     std::optional<std::time_t> shutdownDue_;
     HANDLE shutdownProcess_{};

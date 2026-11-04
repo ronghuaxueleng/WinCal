@@ -22,6 +22,9 @@ struct AppSettings
     bool monthPaging{true};
     bool weatherAutoLocation{true};
     bool weatherUseWttr{};
+    std::wstring fortuneBirthday;
+    std::wstring fortuneBirthTime;
+    std::wstring fortuneGender{L"Unknown"};
     bool taskbarStatus{true};
     std::wstring taskbarFormat{DefaultTaskbarFormat};
 };

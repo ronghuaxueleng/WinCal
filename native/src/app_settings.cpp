@@ -202,6 +202,10 @@ AppSettings SettingsStore::Deserialize(std::string_view content)
     settings.monthPaging = BoolValue(content, "MonthPaging", true);
     settings.weatherAutoLocation = BoolValue(content, "WeatherAutoLocation", true);
     settings.weatherUseWttr = BoolValue(content, "WeatherUseWttr", false);
+    settings.fortuneBirthday = Utf8ToWide(StringValue(content, "FortuneBirthday", ""));
+    settings.fortuneBirthTime = Utf8ToWide(StringValue(content, "FortuneBirthTime", ""));
+    settings.fortuneGender = Utf8ToWide(StringValue(content, "FortuneGender", "Unknown"));
+    if (settings.fortuneGender != L"Male" && settings.fortuneGender != L"Female") settings.fortuneGender = L"Unknown";
     settings.taskbarStatus = BoolValue(content, "TaskbarStatus", true);
     const auto taskbarFormat = StringValue(content, "TaskbarFormat", "");
     if (!taskbarFormat.empty()) settings.taskbarFormat = Utf8ToWide(taskbarFormat);
@@ -233,6 +237,9 @@ std::string SettingsStore::Serialize(const AppSettings& settings)
     json += "  \"MonthPaging\": " + std::string(settings.monthPaging ? "true" : "false") + ",\n";
     json += "  \"WeatherAutoLocation\": " + std::string(settings.weatherAutoLocation ? "true" : "false") + ",\n";
     json += "  \"WeatherUseWttr\": " + std::string(settings.weatherUseWttr ? "true" : "false") + ",\n";
+    json += "  \"FortuneBirthday\": \"" + EscapeJson(settings.fortuneBirthday) + "\",\n";
+    json += "  \"FortuneBirthTime\": \"" + EscapeJson(settings.fortuneBirthTime) + "\",\n";
+    json += "  \"FortuneGender\": \"" + EscapeJson(settings.fortuneGender) + "\",\n";
     json += "  \"TaskbarStatus\": " + std::string(settings.taskbarStatus ? "true" : "false") + ",\n";
     json += "  \"TaskbarFormat\": \"" + EscapeJson(settings.taskbarFormat) + "\"\n}\n";
     return json;
