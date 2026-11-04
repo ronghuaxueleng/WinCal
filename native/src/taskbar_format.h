@@ -15,7 +15,7 @@ inline constexpr std::array<std::wstring_view, 29> TaskbarFieldNames{
     L"tl1", L"tl2", L"tl3", L"tl4", L"tl5", L"tl6", L"tl7",
     L"th1", L"th2", L"th3", L"th4", L"th5", L"th6", L"th7", L"icn"};
 using TaskbarFields = std::array<std::wstring, TaskbarFieldNames.size()>;
-inline constexpr wchar_t DefaultTaskbarFormat[] = L"yyyy-mm-dd HH:ff:ss rhu\\nMD ddd rtm we2 rwd";
+inline constexpr wchar_t DefaultTaskbarFormat[] = L"yyyy-mm-dd HH:ff:ss rhu\\nMD ddd weather rwd";
 
 inline std::wstring NormalizeTaskbarFormat(std::wstring_view text)
 {

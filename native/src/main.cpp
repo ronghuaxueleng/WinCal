@@ -6055,15 +6055,9 @@ private:
                 SetTimer(window_, kOutsideClickTimer, 120, nullptr);
             return 0;
         case kConfirmedClockClickMessage:
-        {
-            const auto now = GetTickCount64();
-            if (!lastClockClickTick_ || now - lastClockClickTick_ > GetDoubleClickTime())
-            {
-                lastClockClickTick_ = now;
-                TogglePopup();
-            }
+            lastClockClickTick_ = GetTickCount64();
+            TogglePopup();
             return 0;
-        }
         case kGlobalMouseMessage:
         {
             MSLLHOOKSTRUCT mouse{};
