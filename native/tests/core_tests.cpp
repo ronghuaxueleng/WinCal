@@ -15,6 +15,28 @@ int main()
         if (!condition) { std::cerr << "FAIL: " << name << '\n'; ++failures; }
     };
     wincal::LunarCalendar lunar;
+    const auto hasObservance = [&](int year, int month, int day, const wchar_t* name)
+    {
+        const auto names = lunar.ObservancesForDate(year, month, day);
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+    check(hasObservance(2026, 11, 7, L"立冬"), "2026 beginning of winter");
+    check(hasObservance(2026, 11, 11, L"购物节"), "shopping festival");
+    check(hasObservance(2026, 11, 22, L"小雪"), "2026 minor snow");
+    check(hasObservance(2026, 11, 23, L"下元节"), "lower yuan lunar festival");
+    check(hasObservance(2026, 11, 26, L"感恩节"), "Thanksgiving is fourth Thursday");
+    check(!hasObservance(2026, 11, 19, L"感恩节"), "third Thursday is not Thanksgiving");
+    check(hasObservance(2026, 2, 4, L"立春"), "2026 beginning of spring");
+    check(hasObservance(2026, 4, 5, L"清明"), "2026 Qingming");
+    check(hasObservance(2026, 12, 22, L"冬至"), "2026 winter solstice");
+    check(hasObservance(2025, 12, 21, L"冬至"), "solar terms vary by year");
+    check(hasObservance(2026, 5, 10, L"母亲节"), "second Sunday in May");
+    check(hasObservance(2026, 6, 21, L"父亲节"), "third Sunday in June");
+    check(hasObservance(2020, 10, 1, L"国庆节") && hasObservance(2020, 10, 1, L"中秋节"),
+          "overlapping Gregorian and lunar observances retained");
+    check(lunar.ObservancesForDate(2026, 11, 3).empty(), "ordinary dates retain lunar labels");
+    check(lunar.ObservancesForDate(2026, 2, 30).empty(), "invalid dates have no observances");
+    check(!hasObservance(2023, 3, 7, L"感恩节"), "unrelated dates have no Thanksgiving");
     wincal::AppSettings syncSettings;
     syncSettings.themeMode = L"Dark";
     syncSettings.fontSizeOffset = 4;
@@ -22,10 +44,11 @@ int main()
     syncSettings.icsAliases = {L"工作\"日历"};
     syncSettings.taskbarFormat = L"yyyy-mm-dd\\nMD '测试'";
     syncSettings.monthPaging = false;
+    syncSettings.weatherUseWttr = true;
     const auto synced = wincal::SettingsStore::Deserialize(wincal::SettingsStore::Serialize(syncSettings));
     check(synced.themeMode == syncSettings.themeMode && synced.fontSizeOffset == 4 &&
           synced.icsUrls == syncSettings.icsUrls && synced.icsAliases == syncSettings.icsAliases &&
-          synced.taskbarFormat == syncSettings.taskbarFormat && !synced.monthPaging,
+          synced.taskbarFormat == syncSettings.taskbarFormat && !synced.monthPaging && synced.weatherUseWttr,
           "cloud settings round trip preserves Unicode, escaping, and options");
     std::tm shutdownNow{};
     shutdownNow.tm_year = 126;

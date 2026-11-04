@@ -128,6 +128,7 @@ std::optional<WeatherSnapshot> ParseWeather(std::string_view json, const Weather
         snapshot.humidity = optionalNumber(L"relative_humidity_2m", 0, 100);
         snapshot.windSpeed = optionalNumber(L"wind_speed_10m", 0, 500);
         snapshot.windDirection = optionalNumber(L"wind_direction_10m", 0, 360);
+        snapshot.feelsLike = optionalNumber(L"apparent_temperature", -120, 90);
         const double code = current.GetNamedNumber(L"weather_code");
         const double isDay = current.GetNamedNumber(L"is_day");
         if (!std::isfinite(snapshot.temperature) || snapshot.temperature < -100 || snapshot.temperature > 70 ||
@@ -145,6 +146,16 @@ std::optional<WeatherSnapshot> ParseWeather(std::string_view json, const Weather
             const auto highs = daily.GetNamedArray(L"temperature_2m_max");
             const auto lows = daily.GetNamedArray(L"temperature_2m_min");
             const auto codes = daily.GetNamedArray(L"weather_code");
+            if (daily.HasKey(L"uv_index_max"))
+            {
+                const auto uv = daily.GetNamedArray(L"uv_index_max");
+                if (uv.Size() && uv.GetAt(0).ValueType() == JsonValueType::Number)
+                {
+                    const auto value = uv.GetNumberAt(0);
+                    if (std::isfinite(value) && value >= 0 && value <= 50) snapshot.uvIndex = value;
+                }
+                snapshot.uvDailyMaximum = true;
+            }
             if (dates.Size() != 7 || highs.Size() != 7 || lows.Size() != 7 || codes.Size() != 7)
                 return std::nullopt;
             for (uint32_t i = 0; i < 7; ++i)
@@ -173,6 +184,123 @@ std::optional<WeatherSnapshot> ParseWeather(std::string_view json, const Weather
         return snapshot;
     }
     catch (const winrt::hresult_error&) { return std::nullopt; }
+}
+
+std::optional<WeatherSnapshot> ParseWttrWeather(std::string_view json, const WeatherLocation& location)
+{
+    try
+    {
+        using namespace winrt::Windows::Data::Json;
+        const auto root = JsonObject::Parse(winrt::to_hstring(json));
+        const auto current = root.GetNamedArray(L"current_condition").GetObjectAt(0);
+        const auto number = [](const JsonObject& obj, const wchar_t* key, double low, double high) -> std::optional<double>
+        {
+            if (!obj.HasKey(key)) return {};
+            const std::wstring text{obj.GetNamedString(key)};
+            size_t used{};
+            const double value = std::stod(text, &used);
+            return used == text.size() && std::isfinite(value) && value >= low && value <= high ?
+                std::optional<double>{value} : std::nullopt;
+        };
+        const auto code = [](int value) -> int
+        {
+            switch (value)
+            {
+            case 113: return 0;
+            case 116: return 2;
+            case 119: case 122: return 3;
+            case 125: case 143: case 146: case 149: case 248: case 260: return 45;
+            case 176: case 293: case 296: case 299: case 302: case 305: case 308: return 63;
+            case 263: case 266: return 53;
+            case 185: case 281: case 284: case 311: case 314: return 67;
+            case 179: case 182: case 227: case 230: case 317: case 320: case 323: case 326:
+            case 329: case 332: case 335: case 338: case 350: return 73;
+            case 353: case 356: case 359: return 81;
+            case 362: case 365: case 368: case 371: case 374: case 377: return 85;
+            case 200: case 386: case 389: case 392: case 395: return 95;
+            default: return -1;
+            }
+        };
+        const auto temperature = number(current, L"temp_C", -100, 70);
+        const auto rawCode = number(current, L"weatherCode", 0, 999);
+        if (!temperature || !rawCode || std::floor(*rawCode) != *rawCode || code(static_cast<int>(*rawCode)) < 0) return {};
+        WeatherSnapshot result;
+        result.provider = L"wttr.in";
+        result.location = location;
+        if (location.source != L"手动选择" && root.HasKey(L"nearest_area"))
+        {
+            const auto area = root.GetNamedArray(L"nearest_area");
+            if (area.Size())
+            {
+                const auto names = area.GetObjectAt(0).GetNamedArray(L"areaName");
+                if (names.Size())
+                {
+                    const std::wstring city{names.GetObjectAt(0).GetNamedString(L"value")};
+                    if (!city.empty()) result.location.city = city == L"Beijing" ? L"北京" : city;
+                }
+            }
+        }
+        result.temperature = *temperature;
+        result.code = code(static_cast<int>(*rawCode));
+        result.condition = static_cast<int>(*rawCode) == 125 ? L"霾" : static_cast<int>(*rawCode) == 146 ? L"烟尘" :
+            static_cast<int>(*rawCode) == 149 ? L"烟霾" : WeatherDescription(result.code);
+        result.feelsLike = number(current, L"FeelsLikeC", -120, 90);
+        result.humidity = number(current, L"humidity", 0, 100);
+        result.windSpeed = number(current, L"windspeedKmph", 0, 500);
+        result.windDirection = number(current, L"winddirDegree", 0, 360);
+        result.uvIndex = number(current, L"uvIndex", 0, 50);
+        // wttr.in does not provide a consistent current is_day field.
+        const double localHour = std::fmod(std::chrono::duration<double, std::ratio<3600>>(
+            std::chrono::system_clock::now().time_since_epoch()).count() + location.longitude / 15 + 24, 24);
+        result.daylight = localHour >= 6 && localHour < 18;
+        const auto days = root.GetNamedArray(L"weather");
+        if (days.Size() == 0 || days.Size() > 7) return {};
+        std::chrono::sys_days previous{};
+        for (uint32_t i = 0; i < days.Size(); ++i)
+        {
+            const auto item = days.GetObjectAt(i);
+            const std::wstring date{item.GetNamedString(L"date")};
+            if (date.size() != 10 || date[4] != L'-' || date[7] != L'-') return {};
+            for (size_t j = 0; j < date.size(); ++j)
+                if (j != 4 && j != 7 && (date[j] < L'0' || date[j] > L'9')) return {};
+            const auto civil = std::chrono::year{std::stoi(date.substr(0, 4))}/
+                static_cast<unsigned>(std::stoi(date.substr(5, 2)))/static_cast<unsigned>(std::stoi(date.substr(8, 2)));
+            if (!civil.ok() || (i && std::chrono::sys_days{civil} - previous != std::chrono::days{1})) return {};
+            previous = std::chrono::sys_days{civil};
+            const auto high = number(item, L"maxtempC", -100, 70), low = number(item, L"mintempC", -100, 70);
+            const auto hours = item.GetNamedArray(L"hourly");
+            if (!high || !low || *low > *high || !hours.Size()) return {};
+            const auto noon = hours.GetObjectAt(hours.Size() / 2);
+            const auto dailyCode = number(noon, L"weatherCode", 0, 999);
+            if (!dailyCode || *dailyCode != std::floor(*dailyCode) || code(static_cast<int>(*dailyCode)) < 0) return {};
+            result.days.push_back({date, *high, *low, code(static_cast<int>(*dailyCode))});
+        }
+        result.available = true;
+        result.updatedAt = std::chrono::system_clock::now();
+        return result;
+    }
+    catch (const winrt::hresult_error&) { return {}; }
+    catch (const std::exception&) { return {}; }
+}
+
+std::wstring UvLevel(double index)
+{
+    if (index < 3) return L"低";
+    if (index < 6) return L"中等";
+    if (index < 8) return L"高";
+    if (index < 11) return L"很高";
+    return L"极高";
+}
+
+std::wstring ClothingAdvice(const WeatherSnapshot& weather)
+{
+    if (!weather.available) return L"暂无天气数据";
+    const double t = weather.feelsLike.value_or(weather.temperature);
+    std::wstring advice = t < 0 ? L"厚羽绒服，注意防寒" : t < 10 ? L"棉服或厚外套" :
+        t < 18 ? L"夹克或针织衫" : t < 24 ? L"长袖，备薄外套" : t < 30 ? L"短袖等轻薄衣物" : L"轻薄透气，注意防暑";
+    if (weather.windSpeed && *weather.windSpeed >= 25) advice += L"；注意防风";
+    if (weather.code >= 51 && weather.code <= 99) advice += L"；带伞防雨雪";
+    return advice;
 }
 
 std::wstring WeatherDescription(int code)
@@ -205,7 +333,9 @@ void WeatherData::LoadCache(const std::filesystem::path& directory)
         WeatherLocation location{root.GetNamedNumber(L"latitude"), root.GetNamedNumber(L"longitude"),
             std::wstring{root.GetNamedString(L"city")}, std::wstring{root.GetNamedString(L"source")}};
         if (!ValidCoordinates(location.latitude, location.longitude)) return;
-        auto cached = ParseWeather(winrt::to_string(root.GetNamedObject(L"response").Stringify()), location);
+        const auto response = winrt::to_string(root.GetNamedObject(L"response").Stringify());
+        auto cached = root.GetNamedString(L"provider", L"Open-Meteo") == L"wttr.in" ?
+            ParseWttrWeather(response, location) : ParseWeather(response, location);
         if (!cached) return;
         const double seconds = root.GetNamedNumber(L"updatedAt");
         const double now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -218,7 +348,7 @@ void WeatherData::LoadCache(const std::filesystem::path& directory)
     catch (const winrt::hresult_error&) { }
 }
 
-bool WeatherData::Refresh(std::stop_token stop, bool automaticLocation)
+bool WeatherData::Refresh(std::stop_token stop, bool automaticLocation, bool useWttr)
 {
     WeatherLocation location;
     location.source = automaticLocation ? L"默认北京" : L"手动选择";
@@ -242,12 +372,17 @@ bool WeatherData::Refresh(std::stop_token stop, bool automaticLocation)
     path.imbue(std::locale::classic());
     path << std::fixed << std::setprecision(4) << L"/v1/forecast?latitude=" << location.latitude
          << L"&longitude=" << location.longitude
-         << L"&current=temperature_2m,weather_code,is_day,relative_humidity_2m,wind_speed_10m,wind_direction_10m"
-         << L"&daily=temperature_2m_max,temperature_2m_min,weather_code&forecast_days=7&timezone=auto";
-    const auto content = GetHttps(L"api.open-meteo.com", path.str(), stop);
+         << L"&current=temperature_2m,apparent_temperature,weather_code,is_day,relative_humidity_2m,wind_speed_10m,wind_direction_10m"
+         << L"&daily=temperature_2m_max,temperature_2m_min,weather_code,uv_index_max&forecast_days=7&timezone=auto";
+    if (useWttr)
+    {
+        path.str(L"");
+        path << L"/" << location.latitude << L"," << location.longitude << L"?format=j1&lang=zh&m";
+    }
+    const auto content = GetHttps(useWttr ? L"wttr.in" : L"api.open-meteo.com", path.str(), stop);
     if (stop.stop_requested()) return false;
-    auto weather = ParseWeather(content, location);
-    if (weather && weather->days.size() != 7) weather.reset();
+    auto weather = useWttr ? ParseWttrWeather(content, location) : ParseWeather(content, location);
+    if (weather && !useWttr && weather->days.size() != 7) weather.reset();
     if (!weather)
     {
         const std::lock_guard lock(mutex_);
@@ -267,6 +402,7 @@ bool WeatherData::Refresh(std::stop_token stop, bool automaticLocation)
         cached.Insert(L"longitude", JsonValue::CreateNumberValue(location.longitude));
         cached.Insert(L"city", JsonValue::CreateStringValue(location.city));
         cached.Insert(L"source", JsonValue::CreateStringValue(location.source));
+        cached.Insert(L"provider", JsonValue::CreateStringValue(weather->provider));
         cached.Insert(L"updatedAt", JsonValue::CreateNumberValue(
             std::chrono::duration<double>(weather->updatedAt.time_since_epoch()).count()));
         cached.Insert(L"response", JsonObject::Parse(winrt::to_hstring(content)));

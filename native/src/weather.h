@@ -31,7 +31,10 @@ struct WeatherSnapshot
 {
     WeatherLocation location;
     double temperature{};
-    std::optional<double> humidity, windSpeed, windDirection;
+    std::optional<double> humidity, windSpeed, windDirection, feelsLike, uvIndex;
+    bool uvDailyMaximum{};
+    std::wstring provider{L"Open-Meteo"};
+    std::wstring condition;
     int code{};
     bool daylight{true};
     bool available{};
@@ -42,6 +45,9 @@ struct WeatherSnapshot
 
 [[nodiscard]] std::optional<WeatherLocation> ParseNetworkLocation(std::string_view json);
 [[nodiscard]] std::optional<WeatherSnapshot> ParseWeather(std::string_view json, const WeatherLocation& location);
+[[nodiscard]] std::optional<WeatherSnapshot> ParseWttrWeather(std::string_view json, const WeatherLocation& location);
+[[nodiscard]] std::wstring UvLevel(double index);
+[[nodiscard]] std::wstring ClothingAdvice(const WeatherSnapshot& weather);
 [[nodiscard]] std::wstring WeatherDescription(int code);
 
 class WeatherData
@@ -49,7 +55,7 @@ class WeatherData
 public:
     void LoadCache(const std::filesystem::path& directory);
     // Call from a COM-initialized worker. Last successful weather survives failures.
-    [[nodiscard]] bool Refresh(std::stop_token stop, bool automaticLocation);
+    [[nodiscard]] bool Refresh(std::stop_token stop, bool automaticLocation, bool useWttr = false);
     [[nodiscard]] WeatherSnapshot Snapshot() const;
 
 private:

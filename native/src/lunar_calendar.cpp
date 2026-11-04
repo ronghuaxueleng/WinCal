@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <icu.h>
+#include <algorithm>
 #include <chrono>
 #include <memory>
 
@@ -38,8 +39,11 @@ std::wstring FestivalName(int month, int day, bool leapMonth)
     case 115: return L"元宵节";
     case 505: return L"端午节";
     case 707: return L"七夕";
+    case 715: return L"中元节";
     case 815: return L"中秋节";
     case 909: return L"重阳节";
+    case 1015: return L"下元节";
+    case 1208: return L"腊八节";
     default: return {};
     }
 }
@@ -47,6 +51,27 @@ std::wstring FestivalName(int month, int day, bool leapMonth)
 
 namespace wincal
 {
+std::vector<std::wstring> LunarCalendar::ObservancesForDate(int year, int month, int day)
+{
+    const std::chrono::year_month_day date{std::chrono::year{year},
+        std::chrono::month{static_cast<unsigned>(month)}, std::chrono::day{static_cast<unsigned>(day)}};
+    if (!date.ok()) return {};
+    if (!solarTerms_.contains(year))
+    {
+        if (solarTerms_.size() >= 8) solarTerms_.clear();
+        solarTerms_.emplace(year, SolarTermDates(year));
+    }
+    std::vector<std::wstring> names;
+    const auto& terms = solarTerms_.at(year);
+    for (size_t i = 0; i < terms.size(); ++i)
+        if (terms[i] == month * 100 + day) names.emplace_back(SolarTermNames[i]);
+    const auto lunar = TextForDate(year, month, day);
+    if (lunar.ends_with(L"节") || lunar == L"七夕" || lunar == L"除夕") names.push_back(lunar);
+    for (auto& name : GregorianObservances(year, month, day))
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(std::move(name));
+    return names;
+}
+
 std::wstring LunarCalendar::TextForDate(int year, int month, int day)
 {
     const auto key = std::tuple{year, month, day};

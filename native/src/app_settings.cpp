@@ -201,6 +201,7 @@ AppSettings SettingsStore::Deserialize(std::string_view content)
     settings.weekStartDay = Utf8ToWide(StringValue(content, "WeekStartDay", "Monday"));
     settings.monthPaging = BoolValue(content, "MonthPaging", true);
     settings.weatherAutoLocation = BoolValue(content, "WeatherAutoLocation", true);
+    settings.weatherUseWttr = BoolValue(content, "WeatherUseWttr", false);
     settings.taskbarStatus = BoolValue(content, "TaskbarStatus", true);
     const auto taskbarFormat = StringValue(content, "TaskbarFormat", "");
     if (!taskbarFormat.empty()) settings.taskbarFormat = Utf8ToWide(taskbarFormat);
@@ -231,6 +232,7 @@ std::string SettingsStore::Serialize(const AppSettings& settings)
     json += "  \"WeekStartDay\": \"" + EscapeJson(settings.weekStartDay) + "\",\n";
     json += "  \"MonthPaging\": " + std::string(settings.monthPaging ? "true" : "false") + ",\n";
     json += "  \"WeatherAutoLocation\": " + std::string(settings.weatherAutoLocation ? "true" : "false") + ",\n";
+    json += "  \"WeatherUseWttr\": " + std::string(settings.weatherUseWttr ? "true" : "false") + ",\n";
     json += "  \"TaskbarStatus\": " + std::string(settings.taskbarStatus ? "true" : "false") + ",\n";
     json += "  \"TaskbarFormat\": \"" + EscapeJson(settings.taskbarFormat) + "\"\n}\n";
     return json;

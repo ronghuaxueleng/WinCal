@@ -13,17 +13,22 @@ int main(int argc, char** argv)
     {
         if (!condition) { std::cerr << "FAIL: " << name << '\n'; ++failures; }
     };
-    if (argc == 2 && (std::string_view{argv[1]} == "--live-beijing" || std::string_view{argv[1]} == "--live-auto"))
+    if (argc == 2 && (std::string_view{argv[1]} == "--live-beijing" || std::string_view{argv[1]} == "--live-auto" || std::string_view{argv[1]} == "--live-wttr"))
     {
         wincal::WeatherData data;
-        check(data.Refresh({}, std::string_view{argv[1]} == "--live-auto"), "live refresh completed");
+        const bool wttr = std::string_view{argv[1]} == "--live-wttr";
+        check(data.Refresh({}, std::string_view{argv[1]} == "--live-auto", wttr), "live refresh completed");
         const auto snapshot = data.Snapshot();
         check(snapshot.available && !snapshot.failed, "live weather is available");
-        check(snapshot.days.size() == 7, "live seven day forecast is available");
+        check(wttr ? !snapshot.days.empty() : snapshot.days.size() == 7, "live forecast is available");
         std::cout << "city=" << winrt::to_string(snapshot.location.city)
                   << "; source=" << winrt::to_string(snapshot.location.source)
                   << "; temperature=" << snapshot.temperature << "; code=" << snapshot.code
-                  << "; forecastDays=" << snapshot.days.size() << '\n';
+                  << "; forecastDays=" << snapshot.days.size()
+                  << "; feelsLike=" << snapshot.feelsLike.value_or(-999)
+                  << "; uv=" << snapshot.uvIndex.value_or(-1)
+                  << "; humidity=" << snapshot.humidity.value_or(-1)
+                  << "; windKmph=" << snapshot.windSpeed.value_or(-1) << '\n';
         return failures ? 1 : 0;
     }
     const auto location = wincal::ParseNetworkLocation(R"({"success":true,"city":"Beijing",
@@ -35,6 +40,31 @@ int main(int argc, char** argv)
     check(!wincal::ParseNetworkLocation(R"({"success":true,"city":"X","latitude":"39","longitude":116})"),
           "wrong location types rejected");
     const wincal::WeatherLocation beijing;
+    const std::string wttrResponse = R"({"current_condition":[{"temp_C":"12","FeelsLikeC":"10","humidity":"68",
+        "windspeedKmph":"18","winddirDegree":"270","uvIndex":"3","weatherCode":"143"}],
+        "weather":[{"date":"2026-11-04","maxtempC":"15","mintempC":"5","hourly":[{"weatherCode":"116"}]},
+                   {"date":"2026-11-05","maxtempC":"13","mintempC":"4","hourly":[{"weatherCode":"296"}]},
+                   {"date":"2026-11-06","maxtempC":"9","mintempC":"0","hourly":[{"weatherCode":"326"}]}]})";
+    const auto wttr = wincal::ParseWttrWeather(wttrResponse, beijing);
+    check(wttr && wttr->provider == L"wttr.in" && wttr->temperature == 12 && wttr->feelsLike == 10 &&
+        wttr->humidity == 68 && wttr->windSpeed == 18 && wttr->code == 45 && wttr->uvIndex == 3 &&
+        !wttr->uvDailyMaximum && wttr->days.size() == 3 && wttr->days.back().code == 73,
+        "wttr fields, units, fog mapping, current UV and three-day forecast");
+    check(!wincal::ParseWttrWeather("{}", beijing) && !wincal::ParseWttrWeather("<html>error</html>", beijing),
+        "wttr failure responses rejected");
+    auto badWttr = wttrResponse;
+    badWttr.replace(badWttr.find("\"12\""), 4, "\"12junk\"");
+    check(!wincal::ParseWttrWeather(badWttr, beijing), "wttr rejects partially parsed temperature");
+    auto hazeResponse = wttrResponse;
+    hazeResponse.replace(hazeResponse.find("\"143\""), 5, "\"149\"");
+    const auto haze = wincal::ParseWttrWeather(hazeResponse, beijing);
+    check(haze && haze->condition == L"烟霾" && haze->code == 45, "wttr extended haze code retains its description");
+    const auto uvWeather = wincal::ParseWeather(R"({"current":{"temperature_2m":20,"apparent_temperature":18,
+        "weather_code":0,"is_day":1}})", beijing);
+    check(uvWeather && uvWeather->feelsLike == 18, "Open-Meteo apparent temperature");
+    check(wincal::UvLevel(2) == L"低" && wincal::UvLevel(3) == L"中等" && wincal::UvLevel(6) == L"高" &&
+        wincal::UvLevel(8) == L"很高" && wincal::UvLevel(11) == L"极高", "UV level boundaries");
+    if (wttr) check(wincal::ClothingAdvice(*wttr).find(L"夹克") != std::wstring::npos, "clothing uses feels-like temperature");
     const std::string response = R"({"current":{"temperature_2m":-3.5,"weather_code":71,"is_day":0}})";
     const auto weather = wincal::ParseWeather(response, beijing);
     const auto detailed = wincal::ParseWeather(R"({"current":{"temperature_2m":8,"weather_code":0,"is_day":1,
@@ -51,6 +81,10 @@ int main(int argc, char** argv)
     check(forecast && forecast->days.size() == 7 && forecast->days[0].low == -10 &&
         forecast->days[6].date == L"2026-11-08" && forecast->days[6].high == 6,
         "seven day forecast preserves aligned dates and subzero temperatures");
+    auto uvResponse = forecastResponse;
+    uvResponse.insert(uvResponse.find("\"time\""), "\"uv_index_max\":[6.2,5,4,3,2,1,0],");
+    const auto dailyUv = wincal::ParseWeather(uvResponse, beijing);
+    check(dailyUv && dailyUv->uvIndex == 6.2 && dailyUv->uvDailyMaximum, "Open-Meteo UV is marked as daily maximum");
     auto invalid = forecastResponse;
     invalid.replace(invalid.find("[-10,-9"), 4, "[10");
     check(!wincal::ParseWeather(invalid, beijing), "inverted daily temperature range rejected");
@@ -99,6 +133,13 @@ int main(int argc, char** argv)
           data.Snapshot().days.size() == 7 &&
           std::chrono::system_clock::now() - data.Snapshot().updatedAt > std::chrono::minutes(59),
           "offline cache retains temperature and its original age");
+    cached.Insert(L"provider", JsonValue::CreateStringValue(L"wttr.in"));
+    cached.Insert(L"response", JsonObject::Parse(winrt::to_hstring(wttrResponse)));
+    check(wincal::WriteFileAtomically(path, winrt::to_string(cached.Stringify())), "prepare wttr cache");
+    wincal::WeatherData wttrCache;
+    wttrCache.LoadCache(directory);
+    check(wttrCache.Snapshot().provider == L"wttr.in" && wttrCache.Snapshot().feelsLike == 10 &&
+        wttrCache.Snapshot().days.size() == 3, "wttr cache preserves provider and detailed fields");
     check(wincal::WriteFileAtomically(path, "{broken"), "prepare invalid cache");
     data.LoadCache(directory);
     check(data.Snapshot().available && data.Snapshot().temperature == -3.5, "bad cache keeps the last good snapshot");

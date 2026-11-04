@@ -33,6 +33,8 @@
 #include "refresh_policy.h"
 #include "app_settings.h"
 #include "lunar_calendar.h"
+#include "almanac.h"
+#include "solar_term_readings.h"
 #include "startup_setting.h"
 #include "taskbar_clock.h"
 #include "clock_extension.h"
@@ -63,6 +65,8 @@ constexpr UINT kTaskbarClockContextMenuMessage = WM_APP + 9;
 constexpr UINT kDismissContextMenuMessage = WM_APP + 10;
 constexpr UINT kClockBoundsUpdatedMessage = WM_APP + 11;
 constexpr UINT kSyncCompletedMessage = WM_APP + 12;
+constexpr UINT kGlobalMouseMessage = WM_APP + 13;
+constexpr UINT kConfirmedClockClickMessage = WM_APP + 14;
 constexpr int kSettingPageSync = 2050;
 constexpr int kSyncAccount = 2051, kSyncPassword = 2052, kSyncTest = 2053, kSyncUpload = 2054, kSyncDownload = 2055;
 constexpr UINT kAnimationTimer = 1;
@@ -76,8 +80,8 @@ constexpr UINT kMenuSettings = 1001;
 constexpr UINT kMenuExit = 1002;
 constexpr wchar_t kCalendarFontFamily[] = L"Microsoft YaHei UI";
 constexpr float kCalendarTitleFontSize = 20.0f;
-constexpr float kCalendarBodyFontSize = 12.0f;
-constexpr float kCalendarCaptionFontSize = 9.0f;
+constexpr float kCalendarBodyFontSize = 16.0f;
+constexpr float kCalendarCaptionFontSize = 12.0f;
 
 float CalendarFontScale(int offset)
 {
@@ -86,7 +90,7 @@ float CalendarFontScale(int offset)
 
 constexpr int kLogicalWidth = 430;
 constexpr int kClockHeight = 86;
-constexpr int kLogicalHeight = 466 + kClockHeight;
+constexpr int kLogicalHeight = 526 + kClockHeight;
 constexpr int kSettingsLogicalWidth = 680;
 constexpr int kSettingsLogicalHeight = 592;
 constexpr int kDetailLogicalWidth = 360;
@@ -95,13 +99,10 @@ constexpr int kHeaderTop = 22;
 constexpr int kWeekTop = 96;
 constexpr int kGridTop = 124;
 constexpr int kCellWidth = 58;
-constexpr int kCellHeight = 49;
+constexpr int kCellHeight = 59;
 constexpr int kGridLeft = 12;
 constexpr wchar_t kAgendaWindowClass[] = L"WinCalNativeAgenda";
-constexpr int kAgendaWidth = 320;
-constexpr int kAgendaHeader = 64;
-constexpr int kAgendaRowHeight = 64;
-constexpr int kVisibleScheduleRows = 5;
+constexpr int kAgendaWidth = 360;
 constexpr int kSettingTheme = 2001;
 constexpr int kSettingFontOffset = 2002;
 constexpr int kSettingFontMinus = 2013;
@@ -113,6 +114,7 @@ constexpr int kSettingPageSource = 2021;
 constexpr int kSettingPageGeneral = 2022;
 constexpr int kSettingPageWeather = 2023;
 constexpr int kSettingWeatherLocation = 2024;
+constexpr int kSettingWeatherProvider = 2028;
 constexpr int kSettingTaskbarStatus = 2025;
 constexpr int kSettingTaskbarFormatPage = 2026;
 constexpr int kSettingTaskbarFormat = 2027;
@@ -379,7 +381,7 @@ public:
         return ok;
     }
 
-    bool RenderAgendaPreview(HINSTANCE instance, int dpi, bool dark, int offset, const wchar_t* path)
+    bool RenderAgendaPreview(HINSTANCE instance, int dpi, bool dark, int offset, const wchar_t* path, bool emptyPreview = false)
     {
         instance_ = instance;
         agendaPreview_ = true;
@@ -395,26 +397,20 @@ public:
         if (!window_) return false;
         PresentAgenda();
         bool ok = !IsWindowVisible(agendaWindow_);
-        for (int i = 0; i < 7; ++i)
+        if (emptyPreview)
         {
-            wincal::CalendarEvent event;
-            event.title = i == 0 ? L"中秋假期 · 与家人团聚" : i == 1
-                ? L"项目评审：讨论下一阶段的设计与交付计划" : L"团队会议与工作安排";
-            event.startYear = 2026; event.startMonth = 9; event.startDay = 22;
-            event.allDay = i == 0;
-            event.startHour = 9 + i;
-            event.startMinute = 30;
-            agendaEvents_.push_back(event);
+            selected_ = {2026, 11, 7};
+            displayMonth_ = 11;
         }
+        dateDetailsOpen_ = true;
         PresentAgenda();
         ok &= IsWindowVisible(agendaWindow_) != FALSE;
         ok &= AgendaHeight() == kLogicalHeight;
-        ok &= AgendaHit(MAKELPARAM(AgendaPx(40), AgendaPx(70))) == 0;
-        ok &= AgendaHit(MAKELPARAM(AgendaPx(40), AgendaPx(20))) == -1;
+        UpdateWindow(agendaWindow_);
         const int month = displayMonth_;
         SendMessageW(agendaWindow_, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
-        ok &= selectedEventScroll_ == 1 && displayMonth_ == month;
-        selectedEventScroll_ = 0;
+        ok &= agendaScroll_ == std::min(48, agendaScrollMax_) && displayMonth_ == month;
+        agendaScroll_ = 0;
         HDC dc = CreateCompatibleDC(nullptr);
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -443,14 +439,10 @@ public:
         SelectObject(dc, previous);
         DeleteObject(bitmap);
         DeleteDC(dc);
-        agendaEvents_.clear();
+        SendMessageW(agendaWindow_, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA * 100)), 0);
+        ok &= agendaScroll_ == agendaScrollMax_;
         PresentAgenda();
-        ok &= !IsWindowVisible(agendaWindow_);
-        wincal::CalendarEvent single;
-        single.title = L"Single event";
-        agendaEvents_.push_back(single);
-        PresentAgenda();
-        ok &= IsWindowVisible(agendaWindow_) && AgendaRows() == 1;
+        ok &= IsWindowVisible(agendaWindow_) != FALSE;
         ok &= AgendaHeight() == kLogicalHeight;
         ok &= RegisterDetailWindowClass();
         for (int target = 0; target < 3; ++target)
@@ -877,9 +869,10 @@ public:
     bool RenderCalendarPreview(HINSTANCE instance, int dpi, bool dark, int dir,
                                int fromYear, int fromMonth, float progress, const wchar_t* path,
                                bool slide = false, bool continuous = false, std::string_view holidayJson = {},
-                               DatePickerMode pickerPreview = DatePickerMode::Closed, bool forecast = false)
+                               DatePickerMode pickerPreview = DatePickerMode::Closed, bool forecast = false, bool wttrPreview = false)
     {
         weatherForecastPreview_ = forecast;
+        weatherWttrPreview_ = wttrPreview;
         if (!holidayJson.empty() && !calendarData_.LoadHolidayYear(fromYear, holidayJson)) return false;
         instance_ = instance;
         dpi_ = dpi;
@@ -1027,6 +1020,7 @@ public:
 
         calendarData_.Load();
         weatherAutoLocation_ = settings_.weatherAutoLocation;
+        weatherUseWttr_ = settings_.weatherUseWttr;
         StartWeatherRefresh();
         UpdateCalendarDiagnostics();
         UpdateTaskbarStatus();
@@ -1096,7 +1090,7 @@ private:
             {
                 swprintf_s(temperature, L" %.0f°C", weather.temperature);
                 const bool cached = weather.failed || std::chrono::system_clock::now() - weather.updatedAt > std::chrono::hours(1);
-                forecast = wincal::WeatherDescription(weather.code) + temperature + (cached ? L"（缓存）" : L"");
+                forecast = (weather.condition.empty() ? wincal::WeatherDescription(weather.code) : weather.condition) + temperature + (cached ? L"（缓存）" : L"");
             }
             const auto lunar = lunarCalendar_.FullTextForDate(time.wYear, time.wMonth, time.wDay);
             wincal::TaskbarFields fields;
@@ -1150,7 +1144,7 @@ private:
                 lock.unlock();
                 try
                 {
-                    if (weatherData_.Refresh(stop, weatherAutoLocation_.load()) && !stop.stop_requested())
+                    if (weatherData_.Refresh(stop, weatherAutoLocation_.load(), weatherUseWttr_.load()) && !stop.stop_requested())
                         PostMessageW(window_, kWeatherUpdatedMessage, 0, 0);
                 }
                 catch (...)
@@ -1631,6 +1625,7 @@ private:
         case kSettingRefresh: return {L"10 分钟", L"30 分钟", L"60 分钟", L"120 分钟", L"1 天"};
         case kSettingWeekStart: return {L"周日", L"周一"};
         case kSettingWeatherLocation: return {L"自动定位", L"固定北京"};
+        case kSettingWeatherProvider: return {L"Open-Meteo（默认）", L"wttr.in"};
         default: return {};
         }
     }
@@ -1717,6 +1712,7 @@ private:
         SetSettingSelection(window, kSettingWeekStart, settingsDraft_.weekStartDay == L"Monday" ? 1 : 0);
         SetSettingSelection(window, kSettingMonthPaging, settingsDraft_.monthPaging ? 1 : 0);
         SetSettingSelection(window, kSettingWeatherLocation, settingsDraft_.weatherAutoLocation ? 0 : 1);
+        SetSettingSelection(window, kSettingWeatherProvider, settingsDraft_.weatherUseWttr ? 1 : 0);
         SetSettingSelection(window, kSettingTaskbarStatus, settingsDraft_.taskbarStatus ? 1 : 0);
         SetDlgItemTextW(window, kSettingTaskbarFormat, settingsDraft_.taskbarFormat.c_str());
     }
@@ -1835,6 +1831,7 @@ private:
                           kSettingTaskbarFormat, 190, 166, 418, 62, 4);
         SendDlgItemMessageW(window, kSettingTaskbarFormat, EM_SETLIMITTEXT, 512, 0);
         button(L"", kSettingWeatherLocation, 190, 178, 418, 38, 3);
+        button(L"", kSettingWeatherProvider, 190, 258, 418, 38, 3);
 
         button(L"恢复默认", kSettingDefaults, 28, 532, 104, 36);
         button(L"取消", kSettingCancel, 438, 532, 88, 36);
@@ -2055,14 +2052,14 @@ private:
         {
             SettingsText(dc, L"天气与位置", 190, 114, 320, 24, settingsLabelFont_, p.primary);
             SettingsText(dc, L"定位方式", 190, 150, 320, 20, settingsBodyFont_, p.secondary);
-            SettingsText(dc, L"自动定位优先使用 Windows 位置服务。", 190, 242, 418, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"无法获取时使用网络定位，仍不可用时默认北京。", 190, 270, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"天气来源", 190, 230, 418, 22, settingsBodyFont_, p.secondary);
+            SettingsText(dc, L"定位优先使用系统位置，其次网络定位，默认北京。", 190, 310, 418, 22, settingsCaptionFont_, p.secondary);
             const auto weather = weatherData_.Snapshot();
             const std::wstring position = weather.available ? L"当前：" + weather.location.city + L" · " + weather.location.source : L"当前：正在获取位置与天气";
-            SettingsText(dc, position.c_str(), 190, 298, 418, 22, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"点击日历顶部天气，查看未来 7 天温度曲线。", 190, 326, 418, 22, settingsBodyFont_, p.primary);
-            SettingsText(dc, L"天气每 15 分钟更新，也可在详情中手动刷新。", 190, 358, 418, 22, settingsCaptionFont_, p.secondary);
-            SettingsText(dc, L"天气数据：Open-Meteo  ·  网络定位：ipwho.is", 190, 414, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, position.c_str(), 190, 338, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"Open-Meteo 提供 7 天预报，wttr.in 通常提供 3 天。", 190, 370, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"点击顶部天气可查看体感、湿度、风速及紫外线。", 190, 402, 418, 22, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"每 15 分钟更新；穿衣建议根据天气生成。", 190, 434, 418, 22, settingsCaptionFont_, p.secondary);
         }
         else if (settingsPage_ == 5)
         {
@@ -2196,7 +2193,7 @@ private:
         displayMonth_ = today.month;
         selected_ = today;
         ResetContinuousScroll();
-        selectedEventScroll_ = 0;
+        agendaScroll_ = 0;
         hoveredCell_ = -1;
         RequestSystemCalendarMonth(displayYear_, displayMonth_);
         scrollAnimating_ = false;
@@ -2217,6 +2214,7 @@ private:
 
     void HidePopup(HideReason reason)
     {
+        dateDetailsOpen_ = false;
         toolsOpen_ = false;
         if (IsWindow(toolsWindow_)) ShowWindow(toolsWindow_, SW_HIDE);
         if (IsWindow(toolInput_)) ShowWindow(toolInput_, SW_HIDE);
@@ -2363,15 +2361,57 @@ private:
     {
         if (code >= HC_ACTION && activeInstance_)
         {
-            if (activeInstance_->HandleGlobalMouse(message, *reinterpret_cast<const MSLLHOOKSTRUCT*>(data)))
+            auto& app = *activeInstance_;
+            const auto& mouse = *reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
+            if (message == WM_LBUTTONUP && app.taskbarClockLeftButtonPending_)
+            {
+                app.taskbarClockLeftButtonPending_ = false;
                 return 1;
+            }
+            if (message == WM_RBUTTONUP && app.taskbarClockRightButtonPending_)
+            {
+                app.taskbarClockRightButtonPending_ = false;
+                return 1;
+            }
+            if (!app.settingsLivePreview_ && (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN))
+            {
+                if (app.IsCachedTaskbarClockPoint(mouse.pt))
+                {
+                    if (message == WM_LBUTTONDOWN)
+                    {
+                        app.taskbarClockLeftButtonPending_ = true;
+                        PostMessageW(app.window_, kConfirmedClockClickMessage,
+                            static_cast<WPARAM>(mouse.pt.x), static_cast<LPARAM>(mouse.pt.y));
+                    }
+                    else
+                    {
+                        app.taskbarClockRightButtonPending_ = true;
+                        PostMessageW(app.window_, kTaskbarClockContextMenuMessage, 0, 0);
+                    }
+                    return 1;
+                }
+                PostMessageW(app.window_, kGlobalMouseMessage, message, MAKELPARAM(mouse.pt.x, mouse.pt.y));
+            }
         }
         return CallNextHookEx(nullptr, code, message, data);
     }
 
     void StartGlobalMouseMonitor()
     {
-        mouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, instance_, 0);
+        mouseHookThread_ = std::jthread([this](std::stop_token stop)
+        {
+            MSG message{};
+            PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+            mouseHookThreadId_ = GetCurrentThreadId();
+            mouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, instance_, 0);
+            while (!stop.stop_requested() && GetMessageW(&message, nullptr, 0, 0) > 0)
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            if (mouseHook_) UnhookWindowsHookEx(mouseHook_);
+            mouseHook_ = nullptr;
+        });
     }
 
     void RefreshTaskbarClockBounds()
@@ -2442,43 +2482,30 @@ private:
 
     bool IsCachedTaskbarClockPoint(POINT point) const
     {
+        const std::lock_guard lock(clockBoundsMutex_);
         return std::any_of(taskbarClockBounds_.begin(), taskbarClockBounds_.end(),
             [point](const auto& entry) { return PtInRect(&entry.second, point) != FALSE; });
     }
 
     void StopGlobalMouseMonitor()
     {
-        if (mouseHook_)
+        if (mouseHookThread_.joinable())
         {
-            UnhookWindowsHookEx(mouseHook_);
-            mouseHook_ = nullptr;
+            mouseHookThread_.request_stop();
+            if (const DWORD id = mouseHookThreadId_.load()) PostThreadMessageW(id, WM_QUIT, 0, 0);
+            mouseHookThread_.join();
+            mouseHookThreadId_ = 0;
         }
     }
 
     bool HandleGlobalMouse(WPARAM message, const MSLLHOOKSTRUCT& mouse)
     {
-        if (message == WM_RBUTTONUP && taskbarClockRightButtonPending_)
-        {
-            taskbarClockRightButtonPending_ = false;
-            return true;
-        }
         if (settingsLivePreview_) return false;
         if ((message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN) && IsWindowVisible(contextMenuWindow_))
         {
             RECT menuRect{};
             if (GetWindowRect(contextMenuWindow_, &menuRect) && !PtInRect(&menuRect, mouse.pt))
                 PostMessageW(window_, kDismissContextMenuMessage, 0, 0);
-        }
-        if (message == WM_RBUTTONDOWN)
-        {
-            const bool onTaskbar = wincal::TaskbarAtPoint(mouse.pt) != nullptr;
-            const bool onClock = IsCachedTaskbarClockPoint(mouse.pt);
-            if (onTaskbar && onClock)
-            {
-                taskbarClockRightButtonPending_ = true;
-                PostMessageW(window_, kTaskbarClockContextMenuMessage, 0, 0);
-                return true;
-            }
         }
         if (message != WM_LBUTTONDOWN)
             return false;
@@ -2937,6 +2964,7 @@ private:
         settingsDraft_.weekStartDay = SettingSelection(window, kSettingWeekStart) == 1 ? L"Monday" : L"Sunday";
         settingsDraft_.monthPaging = SettingSelection(window, kSettingMonthPaging) != 0;
         settingsDraft_.weatherAutoLocation = SettingSelection(window, kSettingWeatherLocation) == 0;
+        settingsDraft_.weatherUseWttr = SettingSelection(window, kSettingWeatherProvider) == 1;
         settingsDraft_.taskbarStatus = SettingSelection(window, kSettingTaskbarStatus) != 0;
         settingsDraft_.taskbarFormat = wincal::NormalizeTaskbarFormat(ReadControlText(GetDlgItem(window, kSettingTaskbarFormat)));
         if (settingsDraft_.taskbarFormat.empty() ||
@@ -3324,7 +3352,7 @@ private:
         pickerMode_ = DatePickerMode::Closed;
         navigationHot_ = -1;
         hoveredCell_ = -1;
-        selectedEventScroll_ = 0;
+        agendaScroll_ = 0;
         continuousAnimating_ = scrollAnimating_ = slideAnimating_ = false;
         slidePos_ = slideTarget_ = 0.0f;
         ResetContinuousScroll();
@@ -3506,7 +3534,6 @@ private:
     }
 
     int AgendaPx(int value) const { return MulDiv(value, agendaDpi_, 96); }
-    int AgendaRows() const { return std::min(kVisibleScheduleRows, static_cast<int>(agendaEvents_.size())); }
     int AgendaHeight() const { return kLogicalHeight; }
 
     void PositionAgenda()
@@ -3522,15 +3549,8 @@ private:
         agendaDpi_ = GetDpiForWindow(window_);
         const int width = AgendaPx(kAgendaWidth), height = AgendaPx(AgendaHeight());
         const int gap = AgendaPx(12);
-        LONG x = anchor.right + gap, y = anchor.top;
-        if (x + width > monitor.rcWork.right)
-            x = anchor.left - width - gap;
-        if (x < monitor.rcWork.left)
-        {
-            x = anchor.left;
-            y = anchor.bottom + gap;
-            if (y + height > monitor.rcWork.bottom) y = anchor.top - height - gap;
-        }
+        LONG x = anchor.left - width - gap, y = anchor.top;
+        if (x < monitor.rcWork.left) x = anchor.right + gap;
         x = std::clamp(x, monitor.rcWork.left, std::max(monitor.rcWork.left, monitor.rcWork.right - width));
         y = std::clamp(y, monitor.rcWork.top, std::max(monitor.rcWork.top, monitor.rcWork.bottom - height));
         SetWindowPos(agendaWindow_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
@@ -3538,7 +3558,6 @@ private:
 
     void UpdateAgenda()
     {
-        agendaEvents_ = calendarData_.EventsForDate(selected_.year, selected_.month, selected_.day);
         PresentAgenda();
     }
 
@@ -3549,17 +3568,15 @@ private:
         const bool outsideContinuousView = !settings_.monthPaging && continuousInitialized_ &&
             (selectedDay < firstVisibleDay || selectedDay >= firstVisibleDay +
                 (continuousPosition_ == std::floor(continuousPosition_) ? 42 : 49));
-        if (toolsOpen_ || weatherPanelOpen_ || pickerMode_ != DatePickerMode::Closed || outsideContinuousView || !IsWindowVisible(window_) || agendaEvents_.empty() ||
+        if (toolsOpen_ || weatherPanelOpen_ || pickerMode_ != DatePickerMode::Closed || outsideContinuousView || !IsWindowVisible(window_) || !dateDetailsOpen_ ||
             (settings_.monthPaging && (selected_.year != displayYear_ || selected_.month != displayMonth_)))
         {
             if (IsWindow(agendaWindow_)) ShowWindow(agendaWindow_, SW_HIDE);
             CloseDetailWindow();
             return;
         }
-        selectedEventScroll_ = std::clamp(selectedEventScroll_, 0,
-            std::max(0, static_cast<int>(agendaEvents_.size()) - kVisibleScheduleRows));
         if (!IsWindow(agendaWindow_))
-            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kAgendaWindowClass, L"日程",
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kAgendaWindowClass, L"日期详情",
                 WS_POPUP, -30000, -30000, 1, 1, window_, nullptr, instance_, this);
         if (!IsWindow(agendaWindow_)) return;
         const BOOL dark = dark_;
@@ -3573,65 +3590,145 @@ private:
 
     void DrawAgenda(HDC dc, RECT client)
     {
-        const COLORREF background = dark_ ? RGB(28,30,38) : RGB(250,251,254);
-        const COLORREF primary = dark_ ? RGB(237,238,245) : RGB(33,38,57);
-        const COLORREF secondary = dark_ ? RGB(164,169,186) : RGB(113,121,144);
-        const COLORREF accent = dark_ ? RGB(162,155,255) : RGB(103,91,218);
-        const auto fill = [&](RECT rect, COLORREF color)
-        {
-            HBRUSH brush = CreateSolidBrush(color);
-            FillRect(dc, &rect, brush);
-            DeleteObject(brush);
-        };
-        fill(client, background);
+        const COLORREF background = dark_ ? RGB(23,25,29) : RGB(241,244,248);
+        const COLORREF surface = dark_ ? RGB(34,37,43) : RGB(255,255,255);
+        const COLORREF primary = dark_ ? RGB(239,242,247) : RGB(32,40,54);
+        const COLORREF secondary = dark_ ? RGB(175,185,200) : RGB(94,108,127);
+        const COLORREF accent = dark_ ? RGB(116,177,255) : RGB(40,108,221);
+        const COLORREF green = dark_ ? RGB(117,216,175) : RGB(25,125,87);
+        const COLORREF red = dark_ ? RGB(255,156,165) : RGB(190,53,72);
+        HBRUSH backgroundBrush = CreateSolidBrush(background);
+        FillRect(dc, &client, backgroundBrush);
+        DeleteObject(backgroundBrush);
         const auto makeFont = [&](float size, int weight)
         {
-            const int height = static_cast<int>(std::lround(
-                size * CalendarFontScale(settings_.fontSizeOffset) * agendaDpi_ / 96.0f));
-            return CreateFontW(-height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
+            return CreateFontW(-static_cast<int>(std::lround(size * CalendarFontScale(settings_.fontSizeOffset) * agendaDpi_ / 96.0f)),
+                0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, kCalendarFontFamily);
         };
-        HFONT title = makeFont(kCalendarTitleFontSize, FW_SEMIBOLD);
-        HFONT body = makeFont(kCalendarBodyFontSize, FW_NORMAL);
-        HFONT caption = makeFont(kCalendarCaptionFontSize, FW_NORMAL);
-        const auto text = [&](const std::wstring& value, int x, int y, int right, int bottom,
-                              HFONT font, COLORREF color)
+        const float fontScale = CalendarFontScale(settings_.fontSizeOffset);
+        HFONT title = makeFont(std::min(21.0f, 27.0f / fontScale), FW_SEMIBOLD), body = makeFont(15, FW_NORMAL);
+        HFONT caption = makeFont(12, FW_NORMAL), badge = makeFont(15, FW_SEMIBOLD);
+        HFONT dayFont = makeFont(32, FW_SEMIBOLD);
+        const auto almanac = wincal::AlmanacForDate(selected_.year, selected_.month, selected_.day);
+        const std::wstring suitable = almanac ? almanac->suitable : L"该日期暂无黄历数据";
+        const std::wstring avoid = almanac ? almanac->avoid : L"该日期暂无黄历数据";
+        auto observances = lunarCalendar_.ObservancesForDate(selected_.year, selected_.month, selected_.day);
+        const auto holiday = calendarData_.HolidayNameForDate(selected_.year, selected_.month, selected_.day);
+        if (!holiday.empty() && std::find(observances.begin(), observances.end(), holiday) == observances.end())
+            observances.push_back(holiday);
+        std::wstring names;
+        for (const auto& name : observances) { if (!names.empty()) names += L" · "; names += name; }
+        const auto measure = [&](const std::wstring& value, int width)
         {
-            DetailText(dc, value.c_str(), {AgendaPx(x), AgendaPx(y), AgendaPx(right), AgendaPx(bottom)},
-                font, color, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            RECT rect{0, 0, AgendaPx(width), 0};
+            const auto oldFont = SelectObject(dc, body);
+            ::DrawTextW(dc, value.c_str(), -1, &rect, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+            SelectObject(dc, oldFont);
+            return std::max(24, MulDiv(rect.bottom + AgendaPx(4), 96, agendaDpi_));
         };
-        text(std::to_wstring(selected_.month) + L"月" + std::to_wstring(selected_.day) + L"日",
-            20, 12, 220, 45, title, primary);
-        text(std::to_wstring(agendaEvents_.size()) + L" 项日程", 228, 16, 302, 42, caption, secondary);
-        for (int row = 0; row < AgendaRows(); ++row)
+        const int bodyLine = std::max(28, static_cast<int>(std::ceil(21 * fontScale)));
+        const int captionLine = std::max(22, static_cast<int>(std::ceil(18 * fontScale)));
+        const int titleBottom = 24 + std::max(32, static_cast<int>(std::ceil(26 * fontScale)));
+        const int weekdayTop = titleBottom + 4, weekdayBottom = weekdayTop + bodyLine;
+        const int ordinalBottom = weekdayBottom + captionLine;
+        const int lunarTop = std::max(110, ordinalBottom + 8), lunarBottom = lunarTop + bodyLine;
+        const int headerBottom = lunarBottom + captionLine + 8;
+        const int almanacTop = headerBottom + 12, yiTop = almanacTop + 16;
+        const int badgeHeight = std::max(30, static_cast<int>(std::ceil(22 * fontScale)));
+        const int yiHeight = std::max(badgeHeight, measure(suitable, 264));
+        const int jiHeight = std::max(badgeHeight, measure(avoid, 264));
+        const int almanacBottom = yiTop + yiHeight + 16 + jiHeight + 16;
+        const int festivalTop = almanacBottom + 12;
+        const int festivalTextTop = festivalTop + 12 + captionLine;
+        const auto reading = wincal::SolarTermReadingForDate(selected_.year, selected_.month, selected_.day);
+        const int explanationTop = festivalTextTop + measure(names.empty() ? L"当天暂无节气或节日" : names, 304) + 12;
+        const int verseTop = reading ? explanationTop + measure(std::wstring{reading->explanation}, 304) + 24 : explanationTop;
+        const int sourceTop = reading ? verseTop + measure(std::wstring{reading->verse}, 280) + 8 : verseTop;
+        const int festivalBottom = reading ? sourceTop + measure(std::wstring{reading->source}, 280) + 24 : explanationTop;
+        const int contentBottom = festivalBottom + 16;
+        agendaScrollMax_ = std::max(0, contentBottom - (AgendaHeight() - 32));
+        agendaScroll_ = std::clamp(agendaScroll_, 0, agendaScrollMax_);
+        const int saved = SaveDC(dc);
+        IntersectClipRect(dc, 0, 0, client.right, AgendaPx(AgendaHeight() - 32));
+        const auto rounded = [&](int left, int top, int right, int bottom, COLORREF color, int radius = 14)
         {
-            const int top = kAgendaHeader + row * kAgendaRowHeight;
-            const auto& event = agendaEvents_[static_cast<size_t>(selectedEventScroll_ + row)];
-            if (row == agendaHotRow_) fill({AgendaPx(10), AgendaPx(top), AgendaPx(310), AgendaPx(top + 62)},
-                dark_ ? RGB(42,44,56) : RGB(238,237,250));
-            fill({AgendaPx(20), AgendaPx(top + 10), AgendaPx(23), AgendaPx(top + 48)}, accent);
-            text(event.title, 34, top + 4, 300, top + 36, body, primary);
-            text(EventTimeText(event, selected_), 34, top + 36, 300, top + 58, caption, secondary);
+            HBRUSH brush = CreateSolidBrush(color);
+            const auto oldBrush = SelectObject(dc, brush);
+            const auto oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+            RoundRect(dc, AgendaPx(left), AgendaPx(top - agendaScroll_), AgendaPx(right),
+                AgendaPx(bottom - agendaScroll_), AgendaPx(radius), AgendaPx(radius));
+            SelectObject(dc, oldPen);
+            SelectObject(dc, oldBrush);
+            DeleteObject(brush);
+        };
+        const auto text = [&](const std::wstring& value, int left, int top, int right, int bottom, HFONT font, COLORREF color,
+                              UINT flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX)
+        {
+            DetailText(dc, value.c_str(), {AgendaPx(left), AgendaPx(top - agendaScroll_),
+                AgendaPx(right), AgendaPx(bottom - agendaScroll_)}, font, color, flags);
+        };
+        rounded(12, 12, 348, headerBottom, surface);
+        rounded(24, 30, 94, 100, dark_ ? RGB(37,61,94) : RGB(230,240,255), 18);
+        text(std::to_wstring(selected_.day), 24, 30, 94, 100, dayFont, accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(std::to_wstring(selected_.year) + L"年" + std::to_wstring(selected_.month) + L"月",
+            108, 24, 338, titleBottom, title, primary);
+        const auto selectedDay = DaysFromCivil(selected_.year, selected_.month, selected_.day);
+        const auto today = Today();
+        const auto distance = selectedDay - DaysFromCivil(today.year, today.month, today.day);
+        static constexpr const wchar_t* weekdays[]{L"星期日", L"星期一", L"星期二", L"星期三", L"星期四", L"星期五", L"星期六"};
+        const auto weekday = static_cast<size_t>((selectedDay + 4) % 7 + 7) % 7;
+        const auto relative = distance == 0 ? L"今天" : std::to_wstring(distance < 0 ? -distance : distance) +
+            (distance < 0 ? L"天前" : L"天后");
+        text(std::wstring(weekdays[weekday]) + L" · " + relative, 108, weekdayTop, 338, weekdayBottom, body, secondary);
+        const auto ordinal = selectedDay - DaysFromCivil(selected_.year, 1, 1) + 1;
+        const auto schedule = calendarData_.ScheduleForDate(selected_.year, selected_.month, selected_.day);
+        text(L"第 " + std::to_wstring(ordinal) + L" 天" + (schedule == wincal::ScheduleLabel::Rest ? L" · 休息日" :
+            schedule == wincal::ScheduleLabel::Work ? L" · 补班日" : L""), 108, weekdayBottom, 338, ordinalBottom, caption, secondary);
+        text(L"农历 " + lunarCalendar_.FullTextForDate(selected_.year, selected_.month, selected_.day),
+            24, lunarTop, 336, lunarBottom, body, primary);
+        if (almanac) text(almanac->monthPillar + L"月 · " + almanac->dayPillar + L"日", 24, lunarBottom, 336, headerBottom - 8, caption, secondary);
+        rounded(12, almanacTop, 348, almanacBottom, surface);
+        rounded(24, yiTop, 58, yiTop + badgeHeight, dark_ ? RGB(30,65,53) : RGB(229,246,237), 12);
+        text(L"宜", 24, yiTop, 58, yiTop + badgeHeight, badge, green, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(suitable, 72, yiTop, 336, yiTop + yiHeight, body, primary, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        const int jiTop = yiTop + yiHeight + 16;
+        rounded(24, jiTop, 58, jiTop + badgeHeight, dark_ ? RGB(76,39,49) : RGB(255,235,239), 12);
+        text(L"忌", 24, jiTop, 58, jiTop + badgeHeight, badge, red, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        text(avoid, 72, jiTop, 336, jiTop + jiHeight, body, primary, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        rounded(12, festivalTop, 348, festivalBottom, surface);
+        text(L"节气与节日", 24, festivalTop + 8, 336, festivalTextTop - 4, caption, secondary);
+        text(names.empty() ? L"当天暂无节气或节日" : names, 24, festivalTextTop, 328, explanationTop - 8,
+            body, names.empty() ? secondary : accent, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        if (reading)
+        {
+            text(std::wstring{reading->explanation}, 24, explanationTop, 328, verseTop - 24,
+                body, primary, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+            rounded(24, verseTop - 10, 336, festivalBottom - 12, dark_ ? RGB(30,45,65) : RGB(239,245,255), 12);
+            text(std::wstring{reading->verse}, 36, verseTop, 324, sourceTop - 8,
+                body, accent, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+            text(std::wstring{reading->source}, 36, sourceTop, 324, festivalBottom - 24,
+                caption, secondary, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
         }
-        const auto footer = agendaEvents_.size() > kVisibleScheduleRows
-            ? std::to_wstring(selectedEventScroll_ + 1) + L"–" +
-              std::to_wstring(selectedEventScroll_ + AgendaRows()) + L" / " +
-              std::to_wstring(agendaEvents_.size()) + L" · 滚动查看更多"
-            : L"点击日程查看详情";
-        text(footer, 20, AgendaHeight() - 27, 302, AgendaHeight() - 3, caption, secondary);
+        RestoreDC(dc, saved);
+        if (agendaScrollMax_ > 0)
+        {
+            const int track = AgendaHeight() - 52;
+            const int thumb = std::max(28, track * (AgendaHeight() - 32) / contentBottom);
+            const int y = 10 + (track - thumb) * agendaScroll_ / agendaScrollMax_;
+            HBRUSH brush = CreateSolidBrush(dark_ ? RGB(95,108,125) : RGB(169,182,199));
+            RECT rect{AgendaPx(354), AgendaPx(y), AgendaPx(357), AgendaPx(y + thumb)};
+            FillRect(dc, &rect, brush);
+            DeleteObject(brush);
+        }
+        const wchar_t* footer = agendaScrollMax_ > 0 ? L"滚轮查看更多 · 点击日期切换" : L"点击其他日期查看详情";
+        DetailText(dc, footer, {AgendaPx(20), AgendaPx(AgendaHeight() - 28), AgendaPx(344), AgendaPx(AgendaHeight() - 4)},
+            caption, secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         DeleteObject(title);
         DeleteObject(body);
         DeleteObject(caption);
-    }
-
-    int AgendaHit(LPARAM point) const
-    {
-        const int x = MulDiv(GET_X_LPARAM(point), 96, agendaDpi_);
-        const int y = MulDiv(GET_Y_LPARAM(point), 96, agendaDpi_);
-        if (x < 10 || x >= 310 || y < kAgendaHeader) return -1;
-        const int row = (y - kAgendaHeader) / kAgendaRowHeight;
-        return row < AgendaRows() ? row : -1;
+        DeleteObject(badge);
+        DeleteObject(dayFont);
     }
 
     LRESULT HandleAgendaMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -3650,26 +3747,9 @@ private:
         }
         case WM_ERASEBKGND: return 1;
         case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-        case WM_MOUSEMOVE:
-        {
-            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
-            TrackMouseEvent(&tracking);
-            const int row = AgendaHit(lParam);
-            if (row != agendaHotRow_) { agendaHotRow_ = row; InvalidateRect(window, nullptr, FALSE); }
-            SetCursor(LoadCursorW(nullptr, row >= 0 ? IDC_HAND : IDC_ARROW));
-            return 0;
-        }
-        case WM_MOUSELEAVE:
-            agendaHotRow_ = -1;
-            InvalidateRect(window, nullptr, FALSE);
-            return 0;
-        case WM_LBUTTONUP:
-            if (const int row = AgendaHit(lParam); row >= 0) ShowEventDetails(row);
-            return 0;
         case WM_MOUSEWHEEL:
-            selectedEventScroll_ = std::clamp(selectedEventScroll_ +
-                (GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1), 0,
-                std::max(0, static_cast<int>(agendaEvents_.size()) - kVisibleScheduleRows));
+            agendaScroll_ = std::clamp(agendaScroll_ - MulDiv(GET_WHEEL_DELTA_WPARAM(wParam), 48, WHEEL_DELTA),
+                0, agendaScrollMax_);
             InvalidateRect(window, nullptr, FALSE);
             return 0;
         case WM_KEYDOWN:
@@ -3974,36 +4054,6 @@ private:
         return DefWindowProcW(window, message, wParam, lParam);
     }
 
-    void ShowEventDetails(int row)
-    {
-        const auto& events = agendaEvents_;
-        const int index = selectedEventScroll_ + row;
-        if (index < 0 || index >= static_cast<int>(events.size()))
-            return;
-        detailScroll_ = 0;
-        detailEvent_ = events[static_cast<size_t>(index)];
-        detailDate_ = selected_;
-        if (!IsWindow(detailWindow_))
-        {
-            detailWindow_ = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                kDetailWindowClass,
-                L"日程详情",
-                WS_POPUP,
-                0, 0, DetailPx(kDetailLogicalWidth), DetailPx(kDetailLogicalHeight),
-                window_, nullptr, instance_, this);
-        }
-        if (detailWindow_)
-        {
-            EnsureDetailFonts(detailWindow_);
-            PositionDetailWindow();
-            ShowWindow(detailWindow_, SW_SHOWNOACTIVATE);
-            SetWindowPos(detailWindow_, HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-            InvalidateRect(detailWindow_, nullptr, FALSE);
-        }
-    }
-
     Date DateForCell(int year, int month, int index) const
     {
         const long long first = DaysFromCivil(year, static_cast<unsigned>(month), 1);
@@ -4043,13 +4093,13 @@ private:
         {
             const auto accent = Brush(theme.accent, alpha);
             renderTarget_->FillEllipse(D2D1::Ellipse(
-                {(rect.left + rect.right) / 2, rect.top + Scale(12)}, Scale(11), Scale(11)), accent.Get());
+                {(rect.left + rect.right) / 2, rect.top + Scale(16)}, Scale(14), Scale(14)), accent.Get());
         }
         else if (isToday)
         {
             const auto accent = Brush(theme.accent, alpha);
             renderTarget_->DrawEllipse(D2D1::Ellipse(
-                {(rect.left + rect.right) / 2, rect.top + Scale(12)}, Scale(11), Scale(11)), accent.Get(), Scale(1.5f));
+                {(rect.left + rect.right) / 2, rect.top + Scale(16)}, Scale(14), Scale(14)), accent.Get(), Scale(1.5f));
         }
 
         wchar_t number[4]{};
@@ -4057,19 +4107,22 @@ private:
         DrawText(
             number,
             dayFormat_.Get(),
-            D2D1::RectF(rect.left, rect.top, rect.right, rect.top + Scale(24)),
+            D2D1::RectF(rect.left, rect.top, rect.right, rect.top + Scale(32)),
             selected ? D2D1::ColorF(0xFFFFFF) : (weekend ? theme.weekend : inMonth ? theme.primary : theme.muted),
             alpha * (!selected && weekend && !inMonth ? 0.4f : 1.0f));
 
         const auto holiday = calendarData_.HolidayNameForDate(date.year, date.month, date.day);
-        const auto lunar = holiday.empty() ? lunarCalendar_.TextForDate(date.year, date.month, date.day) : holiday;
+        const auto observances = lunarCalendar_.ObservancesForDate(date.year, date.month, date.day);
+        const bool specialDay = !observances.empty() || !holiday.empty();
+        const auto lunar = !observances.empty() ? observances.front() :
+            !holiday.empty() ? holiday : lunarCalendar_.TextForDate(date.year, date.month, date.day);
         if (!lunar.empty())
         {
             DrawText(
                 lunar.c_str(),
                 lunarFormat_.Get(),
-                D2D1::RectF(rect.left + Scale(1), rect.top + Scale(24), rect.right - Scale(1), rect.bottom - Scale(5)),
-                selected ? theme.accent : (inMonth ? theme.secondary : theme.muted),
+                D2D1::RectF(rect.left + Scale(1), rect.top + Scale(32), rect.right - Scale(1), rect.bottom - Scale(5)),
+                inMonth ? (specialDay || selected ? theme.accent : theme.secondary) : theme.muted,
                 alpha);
         }
 
@@ -4232,7 +4285,7 @@ private:
                 bodyFormat_.ReleaseAndGetAddressOf());
             if (SUCCEEDED(result)) result = writeFactory_->CreateTextFormat(
                 kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(13), L"zh-CN",
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, TextScale(18), L"zh-CN",
                 dayFormat_.ReleaseAndGetAddressOf());
             if (SUCCEEDED(result)) result = writeFactory_->CreateTextFormat(
                 kCalendarFontFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
@@ -4517,7 +4570,7 @@ private:
                 D2D1::RectF(Scale(334), Scale(16), Scale(416), Scale(50)), theme.primary);
             const bool stale = weather.failed || std::chrono::system_clock::now() - weather.updatedAt > std::chrono::hours(1);
             const std::wstring caption = weather.location.city + L" · " +
-                (stale ? L"缓存" : wincal::WeatherDescription(weather.code));
+                (stale ? L"缓存" : weather.condition.empty() ? wincal::WeatherDescription(weather.code) : weather.condition);
             DrawText(caption.c_str(), clockCaptionFormat_.Get(),
                 D2D1::RectF(Scale(286), Scale(57), Scale(416), Scale(75)), theme.secondary);
         }
@@ -4541,12 +4594,24 @@ private:
 #ifdef WINCAL_SETTINGS_PREVIEW
         weather.location.city = L"北京";
         weather.available = true;
+        weather.temperature = 14;
+        weather.feelsLike = 12;
+        weather.humidity = 48;
+        weather.windSpeed = 18;
+        weather.uvIndex = 3.4;
+        weather.uvDailyMaximum = true;
         weather.updatedAt = std::chrono::system_clock::now();
         weather.days = {{L"2026-11-02", 14, 3, 2}, {L"2026-11-03", 16, 5, 0},
             {L"2026-11-04", 15, 6, 3}, {L"2026-11-05", 11, 4, 61},
             {L"2026-11-06", 10, 1, 71}, {L"2026-11-07", 13, 2, 2}, {L"2026-11-08", 15, 4, 0}};
+        if (weatherWttrPreview_)
+        {
+            weather.provider = L"wttr.in";
+            weather.days.resize(3);
+            weather.uvDailyMaximum = false;
+        }
 #endif
-        DrawText(L"7 天天气", titleFormat_.Get(), D2D1::RectF(Scale(22), Scale(20), Scale(330), Scale(58)), theme.primary);
+        DrawText(L"天气详情", titleFormat_.Get(), D2D1::RectF(Scale(22), Scale(20), Scale(330), Scale(58)), theme.primary);
         DrawText(L"刷新", bodyFormat_.Get(), D2D1::RectF(Scale(354), Scale(62), Scale(410), Scale(86)), theme.accent);
         const auto close = Brush(theme.secondary);
         renderTarget_->DrawLine({Scale(390), Scale(25)}, {Scale(402), Scale(37)}, close.Get(), Scale(1.7f));
@@ -4558,30 +4623,50 @@ private:
             (!weather.days.empty() && weather.days.front().date != todayStamp);
         const std::wstring subtitle = weather.location.city + (stale ? L" · 缓存预报" : L" · 今天起的天气趋势");
         DrawText(subtitle.c_str(), clockCaptionFormat_.Get(), D2D1::RectF(Scale(23), Scale(64), Scale(407), Scale(84)), theme.secondary);
-        if (weather.days.size() != 7)
+        const auto metric = [](const std::optional<double>& value, const wchar_t* unit)
         {
-            DrawText(weather.failed ? L"暂时无法获取预报，点击右上角重试" : L"正在获取 7 天天气预报…",
+            if (!value) return std::wstring{L"—"};
+            wchar_t text[40]{};
+            swprintf_s(text, L"%.1f%s", *value, unit);
+            return std::wstring{text};
+        };
+        const auto summary = [&](const std::wstring& value, float top, float bottom, const D2D1_COLOR_F& color)
+        {
+            DrawText(value.c_str(), clockCaptionFormat_.Get(),
+                {Scale(23), Scale(top), Scale(407), Scale(bottom)}, color);
+        };
+        summary(weather.available ? (weather.condition.empty() ? wincal::WeatherDescription(weather.code) : weather.condition) + L"  ·  气温 " +
+            metric(weather.temperature, L"℃") + L"  ·  体感 " + metric(weather.feelsLike, L"℃") : L"正在获取天气…", 100, 126, theme.primary);
+        summary(L"湿度 " + metric(weather.humidity, L"%") + L"  ·  风速 " + metric(weather.windSpeed, L" km/h"), 130, 154, theme.secondary);
+        summary((weather.uvDailyMaximum ? std::wstring{L"紫外线（今日最高） "} : std::wstring{L"紫外线（当前） "}) +
+            metric(weather.uvIndex, L"") + (weather.uvIndex ? L" · " + wincal::UvLevel(*weather.uvIndex) : L""), 158, 182, theme.secondary);
+        summary(L"穿衣建议：" + wincal::ClothingAdvice(weather), 186, 208, theme.primary);
+        summary(L"根据天气生成 · 请结合个人体感调整", 210, 228, theme.muted);
+        if (weather.days.empty())
+        {
+            DrawText(weather.failed ? L"暂时无法获取预报，点击右上角重试" : L"正在获取天气预报…",
                 bodyFormat_.Get(), D2D1::RectF(Scale(34), Scale(190), Scale(405), Scale(250)), theme.secondary);
             return;
         }
+        const int count = static_cast<int>(weather.days.size());
         const auto warm = D2D1::ColorF(dark_ ? 0xFFBA75 : 0xDA873C);
         const auto cool = D2D1::ColorF(dark_ ? 0x7CBDF4 : 0x4D95D4);
         const auto grid = Brush(theme.separator);
         const auto card = Brush(theme.card);
         renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(
-            D2D1::RectF(Scale(16), Scale(96), Scale(414), Scale(476)), Scale(14), Scale(14)), card.Get());
+            D2D1::RectF(Scale(16), Scale(230), Scale(414), Scale(548)), Scale(14), Scale(14)), card.Get());
         double minimum = weather.days[0].low, maximum = weather.days[0].high;
         for (const auto& day : weather.days) { minimum = std::min(minimum, day.low); maximum = std::max(maximum, day.high); }
         const double range = std::max(12.0, maximum - minimum);
         const auto xy = [&](int i, double value)
         {
-            return D2D1::Point2F(Scale(46 + i * 56.3f), Scale(430 - static_cast<float>((value - minimum) / range) * 144));
+            return D2D1::Point2F(Scale(46 + (count > 1 ? i * 338.0f / (count - 1) : 169.0f)), Scale(490 - static_cast<float>((value - minimum) / range) * 112));
         };
         clockCaptionFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         constexpr std::array<const wchar_t*, 7> weekdays{L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
-        for (int i = 0; i < 7; ++i)
+        for (int i = 0; i < count; ++i)
         {
-            const float x = 46 + i * 56.3f;
+            const float x = 46 + (count > 1 ? i * 338.0f / (count - 1) : 169.0f);
             const auto& day = weather.days[i];
             int year{}, month{}, date{};
             swscanf_s(day.date.c_str(), L"%d-%d-%d", &year, &month, &date);
@@ -4590,15 +4675,15 @@ private:
             const auto delta = DaysFromCivil(year, month, date) - DaysFromCivil(today.year, today.month, today.day);
             const std::wstring label = delta == 0 ? L"今天" : delta == 1 ? L"明天" : weekdays[weekday];
             const auto textRect = [&](float y, float h) { return D2D1::RectF(Scale(x - 27), Scale(y), Scale(x + 27), Scale(y + h)); };
-            DrawText(label.c_str(), clockCaptionFormat_.Get(), textRect(108, 20), i == 0 ? theme.accent : theme.primary);
+            DrawText(label.c_str(), clockCaptionFormat_.Get(), textRect(240, 20), i == 0 ? theme.accent : theme.primary);
             wchar_t stamp[24]{};
             swprintf_s(stamp, L"%02d/%02d", month, date);
-            DrawText(stamp, clockCaptionFormat_.Get(), textRect(130, 18), theme.muted);
-            DrawWeatherIcon(theme, day.code, true, x, 171, false);
-            DrawText(wincal::WeatherDescription(day.code).c_str(), clockCaptionFormat_.Get(), textRect(195, 20), theme.secondary);
+            DrawText(stamp, clockCaptionFormat_.Get(), textRect(262, 18), theme.muted);
+            DrawWeatherIcon(theme, day.code, true, x, 300, false);
+            DrawText(wincal::WeatherDescription(day.code).c_str(), clockCaptionFormat_.Get(), textRect(324, 20), theme.secondary);
         }
         for (int i = 0; i < 3; ++i)
-            renderTarget_->DrawLine({Scale(32), Scale(286 + i * 72.0f)}, {Scale(398), Scale(286 + i * 72.0f)}, grid.Get(), Scale(0.6f));
+            renderTarget_->DrawLine({Scale(32), Scale(370 + i * 52.0f)}, {Scale(398), Scale(370 + i * 52.0f)}, grid.Get(), Scale(0.6f));
         for (bool high : {true, false})
         {
             ComPtr<ID2D1PathGeometry> curve;
@@ -4608,7 +4693,7 @@ private:
             if (SUCCEEDED(factory_->CreatePathGeometry(&curve)) && SUCCEEDED(curve->Open(&sink)))
             {
                 sink->BeginFigure(xy(0, value(0)), D2D1_FIGURE_BEGIN_HOLLOW);
-                for (int i = 1; i < 7; ++i)
+                for (int i = 1; i < count; ++i)
                 {
                     const auto a = xy(i - 1, value(i - 1)), b = xy(i, value(i));
                     const float middle = (a.x + b.x) / 2;
@@ -4618,7 +4703,7 @@ private:
                 sink->Close();
                 renderTarget_->DrawGeometry(curve.Get(), ink.Get(), Scale(2));
             }
-            for (int i = 0; i < 7; ++i)
+            for (int i = 0; i < count; ++i)
             {
                 const auto p = xy(i, value(i));
                 renderTarget_->FillEllipse(D2D1::Ellipse(p, Scale(3.4f), Scale(3.4f)), card.Get());
@@ -4631,17 +4716,17 @@ private:
         }
         clockCaptionFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         const auto warmBrush = Brush(warm), coolBrush = Brush(cool);
-        renderTarget_->DrawLine({Scale(109), Scale(497)}, {Scale(127), Scale(497)}, warmBrush.Get(), Scale(2));
-        renderTarget_->DrawLine({Scale(232), Scale(497)}, {Scale(250), Scale(497)}, coolBrush.Get(), Scale(2));
-        DrawText(L"最高温度", clockCaptionFormat_.Get(), D2D1::RectF(Scale(136), Scale(486), Scale(221), Scale(508)), theme.secondary);
-        DrawText(L"最低温度", clockCaptionFormat_.Get(), D2D1::RectF(Scale(259), Scale(486), Scale(349), Scale(508)), theme.secondary);
+        renderTarget_->DrawLine({Scale(109), Scale(561)}, {Scale(127), Scale(561)}, warmBrush.Get(), Scale(2));
+        renderTarget_->DrawLine({Scale(232), Scale(561)}, {Scale(250), Scale(561)}, coolBrush.Get(), Scale(2));
+        DrawText(L"最高温度", clockCaptionFormat_.Get(), D2D1::RectF(Scale(136), Scale(550), Scale(221), Scale(572)), theme.secondary);
+        DrawText(L"最低温度", clockCaptionFormat_.Get(), D2D1::RectF(Scale(259), Scale(550), Scale(349), Scale(572)), theme.secondary);
         const auto stamp = std::chrono::system_clock::to_time_t(weather.updatedAt);
         std::tm parts{};
         localtime_s(&parts, &stamp);
         wchar_t footer[96]{};
-        swprintf_s(footer, L"Open-Meteo  ·  %02d:%02d 更新%s", parts.tm_hour, parts.tm_min,
+        swprintf_s(footer, L"%s  ·  %02d:%02d 更新%s", weather.provider.c_str(), parts.tm_hour, parts.tm_min,
             weather.failed ? L" · 刷新失败，显示缓存" : L"");
-        DrawText(footer, clockCaptionFormat_.Get(), D2D1::RectF(Scale(23), Scale(521), Scale(413), Scale(544)), theme.muted);
+        DrawText(footer, clockCaptionFormat_.Get(), D2D1::RectF(Scale(23), Scale(580), Scale(413), Scale(604)), theme.muted);
     }
 
     void DrawDatePicker(const Theme& theme)
@@ -4956,21 +5041,22 @@ private:
     int HitTestTools(int x, int y) const
     {
         const float px = x / Scale(1), py = y / Scale(1);
-        return py >= 510 && py < 546 && px >= 20 && px < 56 ? 2 : 0;
+        return py >= kLogicalHeight - 42 && py < kLogicalHeight - 6 && px >= 20 && px < 56 ? 2 : 0;
     }
 
     void DrawTools(const Theme& theme)
     {
         renderTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
-        const auto rect = D2D1::RectF(Scale(22), Scale(514), Scale(54), Scale(544));
+        const float top = static_cast<float>(kLogicalHeight - 38);
+        const auto rect = D2D1::RectF(Scale(22), Scale(top), Scale(54), Scale(top + 30));
         const auto fill = Brush(theme.hover);
         renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(7), Scale(7)), fill.Get());
         const auto ink = Brush(theme.primary);
-        renderTarget_->DrawLine({Scale(31), Scale(529)}, {Scale(45), Scale(529)}, ink.Get(), Scale(1.8f));
-        renderTarget_->DrawLine({Scale(38), Scale(522)}, {Scale(38), Scale(536)}, ink.Get(), Scale(1.8f));
+        renderTarget_->DrawLine({Scale(31), Scale(top + 15)}, {Scale(45), Scale(top + 15)}, ink.Get(), Scale(1.8f));
+        renderTarget_->DrawLine({Scale(38), Scale(top + 8)}, {Scale(38), Scale(top + 22)}, ink.Get(), Scale(1.8f));
         if (shutdownDue_)
             DrawText(L"定时关机计时中", lunarFormat_.Get(),
-                {Scale(66), Scale(514), Scale(264), Scale(544)}, theme.secondary);
+                {Scale(66), Scale(top), Scale(264), Scale(top + 30)}, theme.secondary);
     }
 
     void DrawToolPanel(const Theme& theme)
@@ -5232,10 +5318,13 @@ private:
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         case kSettingsChangedMessage:
+        {
             settings_ = wincal::SettingsStore::Load();
             UpdateTaskbarStatus();
             taskbarStatus_.ConfigureFormat(settings_.taskbarFormat);
-            if (weatherAutoLocation_.exchange(settings_.weatherAutoLocation) != settings_.weatherAutoLocation)
+            const bool locationChanged = weatherAutoLocation_.exchange(settings_.weatherAutoLocation) != settings_.weatherAutoLocation;
+            const bool providerChanged = weatherUseWttr_.exchange(settings_.weatherUseWttr) != settings_.weatherUseWttr;
+            if (locationChanged || providerChanged)
                 StartWeatherRefresh();
             ApplyDwmAppearance();
             DiscardDeviceResources();
@@ -5246,6 +5335,7 @@ private:
             RequestSystemCalendarMonth(displayYear_, displayMonth_);
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
+        }
         case WM_MOUSEMOVE:
         {
             TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window_, 0};
@@ -5289,10 +5379,13 @@ private:
             const int hit = HitTestCell(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             if (hit >= 0)
             {
+                if (toolsOpen_) ToggleTools();
+                if (weatherPanelOpen_) CloseWeatherForecast();
+                dateDetailsOpen_ = true;
                 CloseDetailWindow();
                 const bool continuous = !settings_.monthPaging && continuousInitialized_;
                 selected_ = continuous ? ContinuousDateForCell(hit) : DateForCell(displayYear_, displayMonth_, hit);
-                selectedEventScroll_ = 0;
+                agendaScroll_ = 0;
                 if (!continuous && (selected_.year != displayYear_ || selected_.month != displayMonth_))
                 {
                     const int fromYear = displayYear_;
@@ -5464,12 +5557,28 @@ private:
         case kTaskbarClockClickMessage:
             if (IsCachedTaskbarClockPoint({static_cast<LONG>(wParam), static_cast<LONG>(lParam)}))
             {
-                lastClockClickTick_ = GetTickCount64();
-                TogglePopup();
+                PostMessageW(window_, kConfirmedClockClickMessage, wParam, lParam);
             }
             else if (!settingsLivePreview_ && IsWindowVisible(window_))
                 SetTimer(window_, kOutsideClickTimer, 120, nullptr);
             return 0;
+        case kConfirmedClockClickMessage:
+        {
+            const auto now = GetTickCount64();
+            if (!lastClockClickTick_ || now - lastClockClickTick_ > GetDoubleClickTime())
+            {
+                lastClockClickTick_ = now;
+                TogglePopup();
+            }
+            return 0;
+        }
+        case kGlobalMouseMessage:
+        {
+            MSLLHOOKSTRUCT mouse{};
+            mouse.pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            HandleGlobalMouse(wParam, mouse);
+            return 0;
+        }
         case kClockBoundsUpdatedMessage:
             ApplyTaskbarClockBounds();
             return 0;
@@ -5568,9 +5677,10 @@ private:
     bool agendaPreview_{};
 #endif
     HWND agendaWindow_{};
+    bool dateDetailsOpen_{};
+    int agendaScroll_{};
+    int agendaScrollMax_{};
     UINT agendaDpi_{96};
-    int agendaHotRow_{-1};
-    std::vector<wincal::CalendarEvent> agendaEvents_;
     HWND detailWindow_{};
     int detailScroll_{};
     int detailFontOffset_{};
@@ -5600,9 +5710,11 @@ private:
     HBRUSH settingsCardBrush_{};
 
     HHOOK mouseHook_{};
+    std::jthread mouseHookThread_;
+    std::atomic<DWORD> mouseHookThreadId_{};
     std::vector<std::pair<HWND, RECT>> taskbarClockBounds_;
     std::vector<std::pair<HWND, RECT>> pendingClockBounds_;
-    std::mutex clockBoundsMutex_;
+    mutable std::mutex clockBoundsMutex_;
     std::condition_variable_any clockBoundsWake_;
     bool clockBoundsRequested_{};
     std::jthread clockBoundsThread_;
@@ -5614,6 +5726,7 @@ private:
 
 
     bool taskbarClockRightButtonPending_{};
+    bool taskbarClockLeftButtonPending_{};
     UINT taskbarCreatedMessage_{};
     UINT dpi_{96};
     bool dark_{};
@@ -5623,7 +5736,7 @@ private:
     wincal::AppSettings settings_;
     wincal::AppSettings settingsDraft_;
     wincal::AppSettings settingsBeforeEdit_;
-    bool settingsLivePreview_{};
+    std::atomic<bool> settingsLivePreview_{};
     bool settingsSaveAccepted_{};
     int displayYear_{};
     int displayMonth_{};
@@ -5635,7 +5748,6 @@ private:
     bool pickerKeyboardFocus_{};
     Date selected_{};
     int hoveredCell_{-1};
-    int selectedEventScroll_{};
     float transition_{1.0f};
     bool continuousInitialized_{};
     bool continuousAnimating_{};
@@ -5667,9 +5779,11 @@ private:
     wincal::ClockExtension taskbarStatus_;
     bool weatherPanelOpen_{};
     bool weatherForecastPreview_{};
+    bool weatherWttrPreview_{};
     HWND weatherWindow_{};
     ComPtr<ID2D1HwndRenderTarget> weatherRenderTarget_;
     std::atomic<bool> weatherAutoLocation_{true};
+    std::atomic<bool> weatherUseWttr_{};
     std::mutex weatherRefreshMutex_;
     std::condition_variable_any weatherWake_;
     bool weatherRefreshRequested_{};

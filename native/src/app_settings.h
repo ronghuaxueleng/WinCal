@@ -21,6 +21,7 @@ struct AppSettings
     std::wstring weekStartDay{L"Monday"};
     bool monthPaging{true};
     bool weatherAutoLocation{true};
+    bool weatherUseWttr{};
     bool taskbarStatus{true};
     std::wstring taskbarFormat{DefaultTaskbarFormat};
 };

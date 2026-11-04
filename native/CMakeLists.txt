@@ -135,6 +135,11 @@ target_compile_definitions(WinCalCalendarTests PRIVATE UNICODE _UNICODE WIN32_LE
 target_compile_options(WinCalCalendarTests PRIVATE /utf-8 /W4 /permissive- /EHsc)
 target_link_libraries(WinCalCalendarTests PRIVATE bcrypt ole32 shell32 winhttp windowsapp)
 enable_testing()
+add_executable(WinCalAlmanacTests tests/almanac_tests.cpp)
+target_compile_features(WinCalAlmanacTests PRIVATE cxx_std_20)
+target_compile_options(WinCalAlmanacTests PRIVATE /utf-8 /W4 /permissive- /EHsc)
+add_test(NAME AlmanacRegression COMMAND WinCalAlmanacTests)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lunar/LICENSE" DESTINATION licenses RENAME lunar-LICENSE.txt)
 add_test(NAME CalendarRegression COMMAND WinCalCalendarTests)
 
 add_executable(WinCalCoreTests tests/core_tests.cpp src/lunar_calendar.cpp)

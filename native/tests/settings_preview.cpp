@@ -10,9 +10,10 @@ int wmain(int argc, wchar_t** argv)
     App app;
     if (argc == 2 && wcscmp(argv[1], L"--check-tools") == 0)
         return app.CheckShutdownTools(GetModuleHandleW(nullptr)) ? 0 : 1;
-    if (argc == 5 && wcscmp(argv[1], L"--weather") == 0)
+    if (argc == 5 && (wcscmp(argv[1], L"--weather") == 0 || wcscmp(argv[1], L"--weather-wttr") == 0))
         return app.RenderCalendarPreview(GetModuleHandleW(nullptr), _wtoi(argv[2]),
-            _wtoi(argv[3]) != 0, 1, 2026, 10, 0.5f, argv[4], false, false, {}, DatePickerMode::Closed, true) ? 0 : 1;
+            _wtoi(argv[3]) != 0, 1, 2026, 10, 0.5f, argv[4], false, false, {}, DatePickerMode::Closed, true,
+            wcscmp(argv[1], L"--weather-wttr") == 0) ? 0 : 1;
     if (argc == 2 && wcscmp(argv[1], L"--check-picker") == 0)
         return app.CheckDatePicker(GetModuleHandleW(nullptr)) ? 0 : 1;
     if (argc == 6 && wcscmp(argv[1], L"--picker") == 0)
@@ -37,9 +38,9 @@ int wmain(int argc, wchar_t** argv)
     if (argc == 6 && wcscmp(argv[1], L"--detail") == 0)
         return app.RenderDetailPreview(GetModuleHandleW(nullptr), _wtoi(argv[2]),
             _wtoi(argv[3]) != 0, _wtoi(argv[4]), argv[5]) ? 0 : 1;
-    if (argc == 6 && wcscmp(argv[1], L"--agenda") == 0)
+    if (argc == 6 && (wcscmp(argv[1], L"--agenda") == 0 || wcscmp(argv[1], L"--date-details") == 0))
         return app.RenderAgendaPreview(GetModuleHandleW(nullptr), _wtoi(argv[2]),
-            _wtoi(argv[3]) != 0, _wtoi(argv[4]), argv[5]) ? 0 : 1;
+            _wtoi(argv[3]) != 0, _wtoi(argv[4]), argv[5], wcscmp(argv[1], L"--date-details") == 0) ? 0 : 1;
     if (argc == 9 && wcscmp(argv[1], L"--calendar") == 0)
     {
         return app.RenderCalendarPreview(GetModuleHandleW(nullptr), _wtoi(argv[2]),
