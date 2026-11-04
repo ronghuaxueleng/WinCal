@@ -38,6 +38,7 @@
 #include "clock_extension.h"
 #include "weather.h"
 #include "shutdown_schedule.h"
+#include "config_sync.h"
 #include "../resources/resource.h"
 
 using Microsoft::WRL::ComPtr;
@@ -61,6 +62,9 @@ constexpr UINT kWeatherUpdatedMessage = WM_APP + 8;
 constexpr UINT kTaskbarClockContextMenuMessage = WM_APP + 9;
 constexpr UINT kDismissContextMenuMessage = WM_APP + 10;
 constexpr UINT kClockBoundsUpdatedMessage = WM_APP + 11;
+constexpr UINT kSyncCompletedMessage = WM_APP + 12;
+constexpr int kSettingPageSync = 2050;
+constexpr int kSyncAccount = 2051, kSyncPassword = 2052, kSyncTest = 2053, kSyncUpload = 2054, kSyncDownload = 2055;
 constexpr UINT kAnimationTimer = 1;
 constexpr UINT kOutsideClickTimer = 2;
 constexpr UINT kCalendarRefreshTimer = 3;
@@ -1793,6 +1797,21 @@ private:
         button(L"日历来源", kSettingPageSource, 12, 132, 132, 42);
         button(L"常规设置", kSettingPageGeneral, 12, 182, 132, 42);
         button(L"天气设置", kSettingPageWeather, 12, 232, 132, 42);
+        button(L"配置同步", kSettingPageSync, 12, 282, 132, 42);
+        const auto credentials =
+#ifdef WINCAL_SETTINGS_PREVIEW
+            wincal::SyncCredentials{};
+#else
+            wincal::LoadSyncCredentials();
+#endif
+        AddSettingControl(window, L"EDIT", credentials.account.c_str(), ES_AUTOHSCROLL,
+            kSyncAccount, 202, 184, 390, 26, 5);
+        AddSettingControl(window, L"EDIT", credentials.password.c_str(), ES_AUTOHSCROLL | ES_PASSWORD,
+            kSyncPassword, 202, 256, 390, 26, 5);
+        button(L"测试连接", kSyncTest, 190, 324, 126, 36, 5);
+        button(L"上传配置", kSyncUpload, 328, 324, 126, 36, 5);
+        button(L"下载配置", kSyncDownload, 466, 324, 142, 36, 5);
+        for (int id : {kSyncTest, kSyncUpload, kSyncDownload}) EnableWindow(GetDlgItem(window, id), !syncBusy_);
 
         button(L"跟随系统", kSettingTheme, 190, 178, 134, 42, 0);
         button(L"浅色", kSettingThemeLight, 332, 178, 134, 42, 0);
@@ -1991,6 +2010,7 @@ private:
         else if (settingsPage_ == 1) { group(140, 74); group(218, 248); }
         else if (settingsPage_ == 2) { group(140, 70); group(218, 156); group(382, 90); }
         else if (settingsPage_ == 3) { group(140, 90); group(238, 206); }
+        else if (settingsPage_ == 5) { group(140, 172); group(316, 188); }
         else { group(140, 96); group(240, 100); group(344, 132); }
         if (settingsPage_ == 0)
         {
@@ -2044,6 +2064,19 @@ private:
             SettingsText(dc, L"天气每 15 分钟更新，也可在详情中手动刷新。", 190, 358, 418, 22, settingsCaptionFont_, p.secondary);
             SettingsText(dc, L"天气数据：Open-Meteo  ·  网络定位：ipwho.is", 190, 414, 418, 22, settingsCaptionFont_, p.secondary);
         }
+        else if (settingsPage_ == 5)
+        {
+            SettingsText(dc, L"坚果云 · 配置同步", 190, 114, 400, 24, settingsLabelFont_, p.primary);
+            SettingsText(dc, L"坚果云账号", 190, 152, 400, 22, settingsBodyFont_, p.secondary);
+            SettingsBox(dc, SettingsRect(190, 178, 418, 38), p.card, p.border, 8);
+            SettingsText(dc, L"第三方应用密码", 190, 224, 400, 22, settingsBodyFont_, p.secondary);
+            SettingsBox(dc, SettingsRect(190, 250, 418, 38), p.card, p.border, 8);
+            SettingsText(dc, L"坚果云网页 → 账户信息 → 安全选项 → 第三方应用管理", 190, 292, 440, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"云端位置：WinCal/settings.json", 190, 380, 440, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"上传已保存配置；下载后需点击保存设置。", 190, 406, 440, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, L"凭据仅存于此电脑的 Windows 凭据管理器。", 190, 432, 440, 20, settingsCaptionFont_, p.secondary);
+            SettingsText(dc, syncStatus_.c_str(), 190, 462, 440, 38, settingsCaptionFont_, p.secondary, DT_WORDBREAK);
+        }
         else
         {
             SettingsText(dc, L"任务栏显示格式", 190, 114, 320, 24, settingsLabelFont_, p.primary);
@@ -2075,11 +2108,11 @@ private:
         const bool enabled = IsWindowEnabled(item.hwndItem);
         const bool hot = settingsHotControl_ == item.hwndItem;
         const bool pressed = (item.itemState & ODS_SELECTED) != 0;
-        const bool tab = id >= kSettingPageAppearance && id <= kSettingPageWeather;
+        const bool tab = (id >= kSettingPageAppearance && id <= kSettingPageWeather) || id == kSettingPageSync;
         const bool theme = id == kSettingTheme || id == kSettingThemeLight || id == kSettingThemeDark;
         const bool toggle = id == kSettingAutoStartup || id == kSettingMonthPaging || id == kSettingTaskbarStatus;
         const bool dropdown = !theme && !SettingOptions(id).empty();
-        const bool active = (tab && (settingsPage_ == id - kSettingPageAppearance ||
+        const bool active = (tab && (settingsPage_ == id - kSettingPageAppearance || (id == kSettingPageSync && settingsPage_ == 5) ||
             (settingsPage_ == 4 && id == kSettingPageGeneral))) ||
             (theme && SettingSelection(settingsWindow_, kSettingTheme) == (id == kSettingTheme ? 0 : id == kSettingThemeLight ? 1 : 2));
         const bool primary = id == kSettingSave;
@@ -2848,6 +2881,44 @@ private:
         return result == ERROR_SUCCESS;
     }
 
+    void StartConfigSync(HWND window, int action)
+    {
+        if (syncBusy_) return;
+        const wincal::SyncCredentials credentials{ReadControlText(GetDlgItem(window, kSyncAccount)),
+            ReadControlText(GetDlgItem(window, kSyncPassword))};
+        if (credentials.account.empty() || credentials.password.empty())
+        {
+            syncStatus_ = L"请填写账号和第三方应用密码。";
+            InvalidateRect(window, nullptr, FALSE);
+            return;
+        }
+        if (action == 1 && MessageBoxW(window, L"上传已保存的配置将覆盖云端配置，是否继续？",
+            L"配置同步", MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
+        if (action == 2 && MessageBoxW(window, L"下载将替换设置页中的选项，保存后生效。是否继续？",
+            L"配置同步", MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
+        syncBusy_ = true;
+        syncApplyDownload_ = true;
+        syncStatus_ = L"正在连接坚果云…";
+        for (int id : {kSyncTest, kSyncUpload, kSyncDownload}) EnableWindow(GetDlgItem(window, id), FALSE);
+        InvalidateRect(window, nullptr, FALSE);
+        const auto upload = action == 1 ? wincal::SettingsStore::Serialize(wincal::SettingsStore::Load()) : std::string{};
+        syncThread_ = std::jthread([this, action, credentials, upload]
+        {
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            wincal::SyncResult result;
+            try
+            {
+                result = wincal::SyncNutstore(action, credentials, upload);
+                if (result.success && !wincal::SaveSyncCredentials(credentials))
+                    result.message += L" 凭据保存失败，下次需重新填写。";
+            }
+            catch (...) { result.message = L"同步失败，本地配置未修改。"; }
+            { const std::lock_guard lock(syncMutex_); syncResult_ = std::move(result); }
+            PostMessageW(window_, kSyncCompletedMessage, action, 0);
+            CoUninitialize();
+        });
+    }
+
     void SaveSettingsFromControls(HWND window)
     {
         const int theme = SettingSelection(window, kSettingTheme);
@@ -2958,9 +3029,10 @@ private:
                     point.y >= navTop && point.y < panelBottom;
                 if (overNavigation || overContent)
                 {
-                    const int currentPage = settingsPage_ == 4 ? 2 : settingsPage_;
+                    const int currentPage = settingsPage_ == 4 ? 2 : settingsPage_ == 5 ? 4 : settingsPage_;
                     const int step = GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1;
-                    SelectSettingsPage(window, std::clamp(currentPage + step, 0, 3));
+                    const int next = std::clamp(currentPage + step, 0, 4);
+                    SelectSettingsPage(window, next == 4 ? 5 : next);
                     return 0;
                 }
             }
@@ -3021,6 +3093,10 @@ private:
                 return DrawSettingsButton(*item);
             break;
         case WM_COMMAND:
+            if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSettingPageSync)
+            { SelectSettingsPage(window, 5); return 0; }
+            if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) >= kSyncTest && LOWORD(wParam) <= kSyncDownload)
+            { StartConfigSync(window, LOWORD(wParam) - kSyncTest); return 0; }
             if (LOWORD(wParam) == kSettingTaskbarFormat && HIWORD(wParam) == EN_CHANGE)
             { InvalidateRect(window, nullptr, FALSE); return 0; }
             if (LOWORD(wParam) == kSettingTaskbarFormatPage && HIWORD(wParam) == BN_CLICKED)
@@ -3112,6 +3188,7 @@ private:
             return 0;
         case WM_NCDESTROY:
             FinishLiveSettingsPreview();
+            syncApplyDownload_ = false;
             if (settingsTitleFont_) DeleteObject(settingsTitleFont_);
             if (settingsBodyFont_) DeleteObject(settingsBodyFont_);
             if (settingsLabelFont_) DeleteObject(settingsLabelFont_);
@@ -5396,6 +5473,26 @@ private:
         case kClockBoundsUpdatedMessage:
             ApplyTaskbarClockBounds();
             return 0;
+        case kSyncCompletedMessage:
+        {
+            wincal::SyncResult result;
+            { const std::lock_guard lock(syncMutex_); result = std::move(syncResult_); }
+            syncBusy_ = false;
+            syncStatus_ = result.message;
+            if (IsWindow(settingsWindow_))
+            {
+                if (result.success && wParam == 2 && syncApplyDownload_)
+                {
+                    settingsDraft_ = wincal::SettingsStore::Deserialize(result.downloaded);
+                    PopulateSettingsControls(settingsWindow_);
+                    UpdateSettingsFontControls(settingsWindow_);
+                    ApplySettingsWindowAppearance(settingsWindow_);
+                }
+                for (int id : {kSyncTest, kSyncUpload, kSyncDownload}) EnableWindow(GetDlgItem(settingsWindow_, id), TRUE);
+                InvalidateRect(settingsWindow_, nullptr, FALSE);
+            }
+            return 0;
+        }
         case kScheduleOutsideHideMessage:
             if (!settingsLivePreview_) SetTimer(window_, kOutsideClickTimer, 120, nullptr);
             return 0;
@@ -5412,6 +5509,7 @@ private:
             ShowSettingsWindow();
             return 0;
         case WM_DESTROY:
+            if (syncThread_.joinable()) syncThread_.join();
             if (clockBoundsThread_.joinable()) clockBoundsThread_.request_stop();
             KillTimer(window_, kShutdownTimer);
             if (shutdownProcess_) CloseHandle(shutdownProcess_);
@@ -5449,6 +5547,12 @@ private:
     HWND contextMenuWindow_{};
     int contextMenuHover_{-1};
     HWND settingsWindow_{};
+    std::mutex syncMutex_;
+    std::jthread syncThread_;
+    wincal::SyncResult syncResult_;
+    bool syncBusy_{};
+    bool syncApplyDownload_{};
+    std::wstring syncStatus_;
     HWND toolsWindow_{};
     UINT toolDpi_{96};
     bool shutdownToolOpen_{};

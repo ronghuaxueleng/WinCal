@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "taskbar_format.h"
 
@@ -29,6 +30,8 @@ class SettingsStore
 public:
     [[nodiscard]] static AppSettings Load();
     [[nodiscard]] static bool Save(const AppSettings& settings);
+    [[nodiscard]] static std::string Serialize(const AppSettings& settings);
+    [[nodiscard]] static AppSettings Deserialize(std::string_view content);
     [[nodiscard]] static std::filesystem::path SettingsPath();
     [[nodiscard]] static std::filesystem::path CacheDirectory();
 };

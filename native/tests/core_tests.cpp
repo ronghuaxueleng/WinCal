@@ -15,6 +15,18 @@ int main()
         if (!condition) { std::cerr << "FAIL: " << name << '\n'; ++failures; }
     };
     wincal::LunarCalendar lunar;
+    wincal::AppSettings syncSettings;
+    syncSettings.themeMode = L"Dark";
+    syncSettings.fontSizeOffset = 4;
+    syncSettings.icsUrls = {L"https://example.com/日历.ics?a=1&b=2"};
+    syncSettings.icsAliases = {L"工作\"日历"};
+    syncSettings.taskbarFormat = L"yyyy-mm-dd\\nMD '测试'";
+    syncSettings.monthPaging = false;
+    const auto synced = wincal::SettingsStore::Deserialize(wincal::SettingsStore::Serialize(syncSettings));
+    check(synced.themeMode == syncSettings.themeMode && synced.fontSizeOffset == 4 &&
+          synced.icsUrls == syncSettings.icsUrls && synced.icsAliases == syncSettings.icsAliases &&
+          synced.taskbarFormat == syncSettings.taskbarFormat && !synced.monthPaging,
+          "cloud settings round trip preserves Unicode, escaping, and options");
     std::tm shutdownNow{};
     shutdownNow.tm_year = 126;
     shutdownNow.tm_mon = 10;

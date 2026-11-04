@@ -1,4 +1,4 @@
-#include "atomic_file.h"
+﻿#include "atomic_file.h"
 #include "json_text.h"
 #include "app_settings.h"
 
@@ -183,8 +183,12 @@ std::filesystem::path SettingsStore::CacheDirectory()
 
 AppSettings SettingsStore::Load()
 {
+    return Deserialize(ReadFile(SettingsPath()));
+}
+
+AppSettings SettingsStore::Deserialize(std::string_view content)
+{
     AppSettings settings;
-    const auto content = ReadFile(SettingsPath());
     if (content.empty()) return settings;
     settings.themeMode = Utf8ToWide(StringValue(content, "ThemeMode", "FollowSystem"));
     settings.fontSizeOffset = std::clamp(IntegerValue(content, "FontSizeOffset", 0), -2, 10);
@@ -210,6 +214,11 @@ bool SettingsStore::Save(const AppSettings& settings)
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     if (error) return false;
+    return WriteFileAtomically(path, Serialize(settings));
+}
+
+std::string SettingsStore::Serialize(const AppSettings& settings)
+{
     std::string json = "{\n";
     json += "  \"ThemeMode\": \"" + EscapeJson(settings.themeMode) + "\",\n";
     json += "  \"FontSizeOffset\": " + std::to_string(std::clamp(settings.fontSizeOffset, -2, 10)) + ",\n";
@@ -224,6 +233,6 @@ bool SettingsStore::Save(const AppSettings& settings)
     json += "  \"WeatherAutoLocation\": " + std::string(settings.weatherAutoLocation ? "true" : "false") + ",\n";
     json += "  \"TaskbarStatus\": " + std::string(settings.taskbarStatus ? "true" : "false") + ",\n";
     json += "  \"TaskbarFormat\": \"" + EscapeJson(settings.taskbarFormat) + "\"\n}\n";
-    return WriteFileAtomically(path, json);
+    return json;
 }
 }
